@@ -1,0 +1,6 @@
+dist/
+node_modules/
+coverage/
+.logbook/
+visual_references/
+package-lock.json

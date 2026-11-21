@@ -1,0 +1,42 @@
+name: Frontend CI Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-gate:
+    name: Format, Lint, Typecheck, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting (Prettier)
+        run: npm run format:check
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Typecheck (TypeScript)
+        run: npm run typecheck
+
+      - name: Run low_gear & high_gear tests (Vitest)
+        run: npm run test
+
+      - name: Build production SPA bundle (Vite)
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: https://p9joemg5dj.execute-api.us-east-1.amazonaws.com
