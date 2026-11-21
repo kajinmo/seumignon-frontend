@@ -1,6 +1,6 @@
 # Seu Mignon Frontend — Operational Runbook
 
-> **Status:** Currently in **Epic E0 (UI/UX Discovery & Design Tokens)**. Tooling scripts (`npm run ...`) become active after **Epic E1 (Project Bootstrap)**.
+> **Status:** **Epics E0, E1, E2, E3 & E4 Completed**. All quality gate tooling scripts (`npm run ...`), SPA deep-link routing (`public/_redirects`), and live order tracking (`/orders/:orderId`) are active and verified.
 
 ---
 

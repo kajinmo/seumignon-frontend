@@ -18,11 +18,11 @@ Customer-facing mobile-first delivery SPA for **Seu Mignon**, built with React, 
 
 | Epic | Name | Status |
 | :---: | :--- | :---: |
-| **E0** | UI/UX Discovery & Design Tokens | **IN_PROGRESS** |
-| **E1** | Project Bootstrap & API Client | **PENDING** |
-| **E2** | Catalog & Dish Customization Modal | **PENDING** |
-| **E3** | Cart Drawer, Neighborhood Delivery Fee & Checkout | **PENDING** |
-| **E4** | Order Status Page & Cloudflare Pages Deploy | **PENDING** |
+| **E0** | UI/UX Discovery & Design Tokens | **COMPLETED** |
+| **E1** | Project Bootstrap & API Client | **COMPLETED** |
+| **E2** | Catalog & Dish Customization Modal | **COMPLETED** |
+| **E3** | Cart Drawer, Neighborhood Delivery Fee & Checkout | **COMPLETED** |
+| **E4** | Order Status Page & Cloudflare Pages Deploy | **COMPLETED** |
 
 ---
 
