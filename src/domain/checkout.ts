@@ -7,21 +7,21 @@
 import type {
   CartLineItem,
   CreateOrderRequest,
-  DeliveryZone,
+  DeliveryFeeQuoteResponse,
   OrderResponse,
   OrderStatus,
 } from './types';
-import { findDeliveryZoneById } from './delivery';
+import { formatCepInput } from './delivery';
 
 export interface CheckoutFormDraft {
   name: string;
   phone: string;
   email: string;
   documentNumber: string;
-  zoneId: string;
   postalCode: string;
   streetName: string;
   streetNumber: string;
+  district: string;
   complement: string;
   reference: string;
   notes: string;
@@ -32,10 +32,10 @@ export interface CheckoutFieldErrors {
   phone?: string;
   email?: string;
   documentNumber?: string;
-  zoneId?: string;
   postalCode?: string;
   streetName?: string;
   streetNumber?: string;
+  district?: string;
 }
 
 export interface CheckoutValidationResult {
@@ -57,10 +57,10 @@ export const INITIAL_CHECKOUT_FORM_DRAFT: CheckoutFormDraft = {
   phone: '',
   email: '',
   documentNumber: '',
-  zoneId: '',
   postalCode: '',
   streetName: '',
   streetNumber: '',
+  district: '',
   complement: '',
   reference: '',
   notes: '',
@@ -74,11 +74,12 @@ export function stripNonDigits(raw: string): string {
 }
 
 /**
- * Validates customer and delivery address fields before enabling/submitting `POST /orders`.
+ * Validates customer and delivery address fields (including authoritative CEP delivery quote)
+ * before enabling/submitting `POST /orders`.
  */
 export function validateCheckoutForm(
   draft: CheckoutFormDraft,
-  availableZones: ReadonlyArray<DeliveryZone>,
+  activeQuote?: DeliveryFeeQuoteResponse | null,
 ): CheckoutValidationResult {
   const errors: CheckoutFieldErrors = {};
 
@@ -102,14 +103,18 @@ export function validateCheckoutForm(
     errors.documentNumber = 'Informe um CPF válido (11 dígitos).';
   }
 
-  const matchedZone = findDeliveryZoneById(availableZones, draft.zoneId);
-  if (!matchedZone) {
-    errors.zoneId = 'Selecione seu bairro de entrega na lista.';
-  }
-
   const digitsCep = stripNonDigits(draft.postalCode);
   if (digitsCep.length !== 8) {
     errors.postalCode = 'Informe um CEP válido com 8 dígitos.';
+  } else if (activeQuote !== undefined) {
+    const quotedCepDigits = activeQuote ? stripNonDigits(activeQuote.cep) : '';
+    if (!activeQuote || quotedCepDigits !== digitsCep) {
+      errors.postalCode = 'Confirme um CEP válido dentro da área de entrega (até 5,5 km).';
+    }
+  }
+
+  if (draft.district.trim().length < 2) {
+    errors.district = 'Informe o bairro de entrega.';
   }
 
   if (draft.streetName.trim().length < 2) {
@@ -132,8 +137,9 @@ export function validateCheckoutForm(
 export function buildCreateOrderRequest(params: {
   draft: CheckoutFormDraft;
   cartItems: ReadonlyArray<CartLineItem>;
+  customerId?: string;
 }): CreateOrderRequest {
-  const { draft, cartItems } = params;
+  const { draft, cartItems, customerId = '' } = params;
 
   if (cartItems.length === 0) {
     throw new Error('Cannot build CreateOrderRequest with an empty cart.');
@@ -145,15 +151,15 @@ export function buildCreateOrderRequest(params: {
       phone: stripNonDigits(draft.phone),
       email: draft.email.trim().toLowerCase(),
       document_number: stripNonDigits(draft.documentNumber),
-      customer_id: '',
+      customer_id: customerId,
     },
     delivery_address: {
-      zone_id: draft.zoneId.trim(),
+      postal_code: formatCepInput(draft.postalCode),
       street_name: draft.streetName.trim(),
       street_number: draft.streetNumber.trim(),
+      district: draft.district.trim(),
       city: 'São Paulo',
       state: 'SP',
-      postal_code: stripNonDigits(draft.postalCode),
       complement: draft.complement.trim(),
       reference: draft.reference.trim(),
       country: 'BR',

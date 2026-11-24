@@ -3,7 +3,13 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/App';
 import { ApiClientError, SeuMignonApiClient } from '../../src/services/api';
-import type { CreateOrderRequest, MenuResponse, OrderResponse } from '../../src/domain';
+import type {
+  CreateOrderRequest,
+  CustomerProfileResponse,
+  DeliveryFeeQuoteResponse,
+  MenuResponse,
+  OrderResponse,
+} from '../../src/domain';
 
 const mockMenuResponse: MenuResponse = {
   updated_at_iso: '2026-11-21T12:00:00+00:00',
@@ -45,7 +51,15 @@ const mockMenuResponse: MenuResponse = {
 };
 
 describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shell', () => {
-  it('calls GET /health and GET /menu with normalized baseUrl and parses contracts', async () => {
+  it('calls GET /health, GET /menu, and GET /delivery-fee with normalized baseUrl and handles 422 CEP errors', async () => {
+    const sampleQuote: DeliveryFeeQuoteResponse = {
+      cep: '03195000',
+      distance_km: 0.0,
+      fee_cents: 500,
+      district: 'Alto da Mooca',
+      source: 'local_index',
+    };
+
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url.endsWith('/health')) {
@@ -59,6 +73,24 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      if (url.includes('/delivery-fee?cep=03195-000')) {
+        return new Response(JSON.stringify(sampleQuote), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/delivery-fee?cep=09999-000')) {
+        return new Response(
+          JSON.stringify({
+            error: 'DeliveryOutOfRangeError',
+            detail: 'CEP outside 5.5 km cutoff.',
+          }),
+          {
+            status: 422,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
       }
       return new Response(JSON.stringify({ error: 'NotFound', detail: 'Not found' }), {
         status: 404,
@@ -77,10 +109,20 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
 
     const menu = await client.getMenu();
     expect(menu.items[0].price_cents).toBe(6890);
-    expect(menu.delivery_zones[0].fee_cents).toBe(500);
+
+    const quote = await client.getDeliveryFee('03195000');
+    expect(quote).toEqual(sampleQuote);
+
+    await expect(client.getDeliveryFee('09999-000')).rejects.toEqual(
+      expect.objectContaining<Partial<ApiClientError>>({
+        name: 'ApiClientError',
+        status: 422,
+        errorCode: 'DeliveryOutOfRangeError',
+      }),
+    );
   });
 
-  it('submits POST /orders and normalizes backend { error, detail } envelopes into ApiClientError', async () => {
+  it('submits POST /orders (guest and authenticated Bearer access_token) and normalizes errors into ApiClientError', async () => {
     const mockOrderResponse: OrderResponse = {
       order_id: 'ord_e24dd227043c47b3',
       display_id: '4821',
@@ -95,12 +137,19 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
       payment_method: '',
       items: [],
       notes: '',
+      user_id: '',
     };
 
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
         new Response(JSON.stringify(mockOrderResponse), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...mockOrderResponse, user_id: 'cognito-sub-1' }), {
           status: 201,
           headers: { 'Content-Type': 'application/json' },
         }),
@@ -132,12 +181,12 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
         document_number: '12345678909',
       },
       delivery_address: {
-        zone_id: 'zone_jardins',
-        street_name: 'Rua Augusta',
-        street_number: '1500',
+        postal_code: '03195-000',
+        street_name: 'Rua Exemplo',
+        street_number: '123',
+        district: 'Alto da Mooca',
         city: 'São Paulo',
         state: 'SP',
-        postal_code: '01304001',
       },
       items: [
         {
@@ -154,9 +203,17 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
       ],
     };
 
-    const created = await client.createOrder(samplePayload);
-    expect(created.order_id).toBe('ord_e24dd227043c47b3');
-    expect(created.checkout_url).toBe('https://payment-link.pagar.me/pl_123');
+    // Guest checkout (no Authorization header)
+    const guestOrder = await client.createOrder(samplePayload);
+    expect(guestOrder.order_id).toBe('ord_e24dd227043c47b3');
+    const firstCallHeaders = fetchMock.mock.calls[0][1]?.headers as Headers;
+    expect(firstCallHeaders.has('Authorization')).toBe(false);
+
+    // Authenticated checkout (Authorization: Bearer <access_token>)
+    const authOrder = await client.createOrder(samplePayload, { accessToken: 'acc_token_xyz' });
+    expect(authOrder.user_id).toBe('cognito-sub-1');
+    const secondCallHeaders = fetchMock.mock.calls[1][1]?.headers as Headers;
+    expect(secondCallHeaders.get('Authorization')).toBe('Bearer acc_token_xyz');
 
     await expect(client.createOrder(samplePayload)).rejects.toEqual(
       expect.objectContaining<Partial<ApiClientError>>({
@@ -165,6 +222,101 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
         errorCode: 'ChoiceValidationError',
       }),
     );
+  });
+
+  it('calls passwordless Email OTP and /me/* endpoints with Authorization Bearer access_token', async () => {
+    const sampleProfile: CustomerProfileResponse = {
+      user_id: 'sub_123',
+      email: 'cliente@exemplo.com',
+      name: 'Maria Silva',
+      phone: '11999998888',
+      document_number: '12345678909',
+      default_address: {
+        street_name: 'Rua Exemplo',
+        street_number: '123',
+        district: 'Alto da Mooca',
+        city: 'São Paulo',
+        state: 'SP',
+        postal_code: '03195-000',
+        complement: '',
+        reference: '',
+        country: 'BR',
+      },
+    };
+
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const authHeader = new Headers(init?.headers).get('Authorization');
+
+      if (url.endsWith('/auth/request-code') && init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            email: 'cliente@exemplo.com',
+            challenge_name: 'EMAIL_OTP',
+            session: 'sess_abc',
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/auth/verify-code') && init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            user_id: 'sub_123',
+            email: 'cliente@exemplo.com',
+            access_token: 'acc_123',
+            id_token: 'id_123',
+            refresh_token: 'ref_123',
+            expires_in_seconds: 3600,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/me/profile') && init?.method === 'GET') {
+        expect(authHeader).toBe('Bearer acc_123');
+        return new Response(JSON.stringify(sampleProfile), { status: 200 });
+      }
+      if (url.endsWith('/me/profile') && init?.method === 'PUT') {
+        expect(authHeader).toBe('Bearer acc_123');
+        return new Response(JSON.stringify(sampleProfile), { status: 200 });
+      }
+      if (url.endsWith('/me/orders') && init?.method === 'GET') {
+        expect(authHeader).toBe('Bearer acc_123');
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'NotFound', detail: 'Not found' }), {
+        status: 404,
+      });
+    });
+
+    const client = new SeuMignonApiClient({
+      baseUrl: 'https://p9joemg5dj.execute-api.us-east-1.amazonaws.com',
+      fetchImpl: fetchMock,
+    });
+
+    const challenge = await client.requestAuthCode('cliente@exemplo.com');
+    expect(challenge.session).toBe('sess_abc');
+
+    const tokens = await client.verifyAuthCode({
+      email: 'cliente@exemplo.com',
+      code: '12345678',
+      session: challenge.session,
+    });
+    expect(tokens.access_token).toBe('acc_123');
+
+    const profile = await client.getMyProfile(tokens.access_token);
+    expect(profile.default_address?.district).toBe('Alto da Mooca');
+
+    const saved = await client.updateMyProfile(tokens.access_token, {
+      email: profile.email,
+      name: profile.name,
+      phone: profile.phone,
+      document_number: profile.document_number,
+      default_address: profile.default_address!,
+    });
+    expect(saved.user_id).toBe('sub_123');
+
+    const myOrders = await client.getMyOrders(tokens.access_token);
+    expect(myOrders).toEqual([]);
   });
 
   it('renders App shell and switches live between Theme A (Azul #10388B) and Theme B (Vermelho #CB2031)', async () => {

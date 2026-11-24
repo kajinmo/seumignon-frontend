@@ -1,6 +1,6 @@
 /**
- * Pure helper functions for pre-calculated neighborhood delivery zones (zero Maps API cost).
- * Supports accent-insensitive search for the checkout neighborhood selector.
+ * Pure helper functions for CEP delivery formatting, friendly CEP error presentation,
+ * and pre-calculated delivery zones search.
  */
 
 import type { DeliveryZone } from './types';
@@ -14,6 +14,40 @@ export function normalizeSearchText(text: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
     .toLowerCase();
+}
+
+/**
+ * Formats raw numeric CEP input into `XXXXX-XXX` (capped at 8 digits).
+ */
+export function formatCepInput(raw: string): string {
+  const digits = raw.replace(/\D+/g, '').slice(0, 8);
+  if (digits.length <= 5) {
+    return digits;
+  }
+  return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+}
+
+/**
+ * Returns true when the raw CEP string contains exactly 8 numeric digits.
+ */
+export function isCompleteCep(raw: string): boolean {
+  return raw.replace(/\D+/g, '').length === 8;
+}
+
+/**
+ * Maps backend CEP 422 error codes to customer-friendly pt-BR guidance.
+ */
+export function getFriendlyCepErrorMessage(errorCode: string, fallbackDetail: string): string {
+  switch (errorCode) {
+    case 'DeliveryOutOfRangeError':
+      return 'Infelizmente este CEP está fora do nosso raio de entrega própria de 5,5 km.';
+    case 'CepNotFoundError':
+      return 'CEP não encontrado. Verifique os 8 números digitados.';
+    case 'InvalidCepError':
+      return 'Informe um CEP válido com 8 dígitos (ex.: 03195-000).';
+    default:
+      return fallbackDetail || 'Não foi possível calcular o frete para este CEP agora.';
+  }
 }
 
 /**

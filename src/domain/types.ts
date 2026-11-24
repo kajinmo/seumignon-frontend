@@ -44,6 +44,16 @@ export interface DeliveryZone {
   fee_cents: number;
 }
 
+export interface DeliveryFeeQuoteResponse {
+  cep: string;
+  distance_km: number;
+  fee_cents: number;
+  district: string;
+  source: string;
+}
+
+export type CepErrorCode = 'DeliveryOutOfRangeError' | 'CepNotFoundError' | 'InvalidCepError';
+
 export interface MenuResponse {
   updated_at_iso: string;
   items: MenuItem[];
@@ -86,12 +96,12 @@ export interface CustomerInput {
 }
 
 export interface DeliveryAddressInput {
-  zone_id: string;
+  postal_code: string;
   street_name: string;
   street_number: string;
+  district: string;
   city: string;
   state: string;
-  postal_code: string;
   complement?: string;
   reference?: string;
   country?: string;
@@ -147,6 +157,62 @@ export interface OrderResponse {
   payment_method: string;
   items: OrderItemResponse[];
   notes: string;
+  user_id?: string;
+}
+
+export interface AuthRequestCodeRequest {
+  email: string;
+}
+
+export interface AuthRequestCodeResponse {
+  email: string;
+  challenge_name: string;
+  session: string;
+}
+
+export interface AuthVerifyCodeRequest {
+  email: string;
+  code: string;
+  session: string;
+}
+
+export interface AuthVerifyCodeResponse {
+  user_id: string;
+  email: string;
+  access_token: string;
+  id_token: string;
+  refresh_token: string;
+  expires_in_seconds: number;
+}
+
+export interface CustomerProfileAddress {
+  street_name: string;
+  street_number: string;
+  district: string;
+  city: string;
+  state: string;
+  postal_code: string;
+  complement: string;
+  reference: string;
+  country: string;
+}
+
+export interface CustomerProfileResponse {
+  user_id: string;
+  email: string;
+  name: string;
+  phone: string;
+  document_number: string;
+  default_address: CustomerProfileAddress | null;
+  updated_at_iso?: string;
+}
+
+export interface UpsertCustomerProfileRequest {
+  email: string;
+  name: string;
+  phone: string;
+  document_number: string;
+  default_address: CustomerProfileAddress;
 }
 
 export interface ApiErrorEnvelope {

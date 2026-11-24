@@ -3,12 +3,20 @@
  * Normalizes backend `{ error, detail }` error responses into typed `ApiClientError` instances.
  */
 
-import type {
-  ApiErrorEnvelope,
-  CreateOrderRequest,
-  HealthResponse,
-  MenuResponse,
-  OrderResponse,
+import {
+  formatCepInput,
+  stripNonDigits,
+  type ApiErrorEnvelope,
+  type AuthRequestCodeResponse,
+  type AuthVerifyCodeRequest,
+  type AuthVerifyCodeResponse,
+  type CreateOrderRequest,
+  type CustomerProfileResponse,
+  type DeliveryFeeQuoteResponse,
+  type HealthResponse,
+  type MenuResponse,
+  type OrderResponse,
+  type UpsertCustomerProfileRequest,
 } from '../domain';
 
 const DEFAULT_API_BASE_URL = 'https://p9joemg5dj.execute-api.us-east-1.amazonaws.com';
@@ -67,14 +75,40 @@ export class SeuMignonApiClient {
     return this.request<MenuResponse>('/menu', { method: 'GET', signal });
   }
 
+  public async getDeliveryFee(
+    cep: string,
+    signal?: AbortSignal,
+  ): Promise<DeliveryFeeQuoteResponse> {
+    const digits = stripNonDigits(cep);
+    if (digits.length !== 8) {
+      throw new ApiClientError({
+        status: 422,
+        errorCode: 'InvalidCepError',
+        detail: 'Informe um CEP válido com 8 dígitos (ex.: 03195-000).',
+      });
+    }
+    const formatted = formatCepInput(digits);
+    return this.request<DeliveryFeeQuoteResponse>(
+      `/delivery-fee?cep=${encodeURIComponent(formatted)}`,
+      { method: 'GET', signal },
+    );
+  }
+
   public async createOrder(
     payload: CreateOrderRequest,
-    signal?: AbortSignal,
+    options?: { accessToken?: string | null; signal?: AbortSignal },
   ): Promise<OrderResponse> {
+    const headers: Record<string, string> = {};
+    const token = options?.accessToken?.trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
     return this.request<OrderResponse>('/orders', {
       method: 'POST',
+      headers,
       body: JSON.stringify(payload),
-      signal,
+      signal: options?.signal,
     });
   }
 
@@ -89,6 +123,70 @@ export class SeuMignonApiClient {
     }
     return this.request<OrderResponse>(`/orders/${encodeURIComponent(trimmedId)}`, {
       method: 'GET',
+      signal,
+    });
+  }
+
+  public async requestAuthCode(
+    email: string,
+    signal?: AbortSignal,
+  ): Promise<AuthRequestCodeResponse> {
+    return this.request<AuthRequestCodeResponse>('/auth/request-code', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.trim().toLowerCase() }),
+      signal,
+    });
+  }
+
+  public async verifyAuthCode(
+    payload: AuthVerifyCodeRequest,
+    signal?: AbortSignal,
+  ): Promise<AuthVerifyCodeResponse> {
+    return this.request<AuthVerifyCodeResponse>('/auth/verify-code', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: payload.email.trim().toLowerCase(),
+        code: payload.code.trim(),
+        session: payload.session,
+      }),
+      signal,
+    });
+  }
+
+  public async getMyProfile(
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<CustomerProfileResponse> {
+    return this.request<CustomerProfileResponse>('/me/profile', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      signal,
+    });
+  }
+
+  public async updateMyProfile(
+    accessToken: string,
+    payload: UpsertCustomerProfileRequest,
+    signal?: AbortSignal,
+  ): Promise<CustomerProfileResponse> {
+    return this.request<CustomerProfileResponse>('/me/profile', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  }
+
+  public async getMyOrders(accessToken: string, signal?: AbortSignal): Promise<OrderResponse[]> {
+    return this.request<OrderResponse[]>('/me/orders', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
       signal,
     });
   }
@@ -165,6 +263,63 @@ export class SeuMignonApiClient {
       error: `HTTP_${String(response.status)}`,
       detail: `Erro inesperado na comunicação com o servidor (HTTP ${String(response.status)}).`,
     };
+  }
+}
+
+export interface PublicCepLookupResult {
+  streetName?: string;
+  district?: string;
+  city?: string;
+  state?: string;
+}
+
+/**
+ * Best-effort public CEP lookup via ViaCEP for street/district autofill only.
+ * Never used as delivery fee authority (delivery fee always comes from `GET /delivery-fee`).
+ */
+export async function lookupCepAddressPublic(
+  cep: string,
+  signal?: AbortSignal,
+): Promise<PublicCepLookupResult | null> {
+  const digits = stripNonDigits(cep);
+  if (digits.length !== 8) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 3000);
+  const onParentAbort = () => controller.abort();
+  signal?.addEventListener('abort', onParentAbort, { once: true });
+
+  try {
+    const response = await fetch(`https://viacep.com.br/ws/${digits}/json/`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as {
+      erro?: boolean;
+      logradouro?: string;
+      bairro?: string;
+      localidade?: string;
+      uf?: string;
+    };
+    if (data.erro) {
+      return null;
+    }
+    return {
+      streetName: data.logradouro?.trim() || undefined,
+      district: data.bairro?.trim() || undefined,
+      city: data.localidade?.trim() || undefined,
+      state: data.uf?.trim() || undefined,
+    };
+  } catch {
+    return null;
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', onParentAbort);
   }
 }
 
