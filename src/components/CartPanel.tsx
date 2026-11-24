@@ -6,19 +6,13 @@
  */
 
 import { ArrowRight, ExternalLink, Minus, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
-import {
-  calculateLineItemTotalCents,
-  formatCentsToBRL,
-  type HealthResponse,
-  type ThemeId,
-} from '../domain';
+import { calculateLineItemTotalCents, formatCentsToBRL, type ThemeId } from '../domain';
 import { useCart } from '../contexts/CartContext';
 import { BoizinhoMascot } from './BoizinhoMascot';
 import { CepDeliverySelector } from './CepDeliverySelector';
 
 interface CartPanelProps {
   theme: ThemeId;
-  health: HealthResponse | null;
   onProceedToCheckout: () => void;
   onTrackOrder?: (orderId: string) => void;
   onCloseDrawer?: () => void;
@@ -27,7 +21,6 @@ interface CartPanelProps {
 
 export function CartPanel({
   theme,
-  health,
   onProceedToCheckout,
   onTrackOrder,
   onCloseDrawer,
@@ -48,12 +41,7 @@ export function CartPanel({
     removeLine,
     quoteDeliveryByCep,
     updateCheckoutDraft,
-    clearPersonalData,
   } = useCart();
-
-  const hasLocalPersonalData =
-    Boolean(checkoutDraft.name || checkoutDraft.postalCode || checkoutDraft.email) ||
-    recentOrders.length > 0;
 
   return (
     <div className="flex flex-col">
@@ -252,24 +240,6 @@ export function CartPanel({
               <ArrowRight className="h-4 w-4" />
             </span>
           </button>
-        </div>
-      )}
-
-      {/* Subtle API Connection & Privacy Footer */}
-      {(health || hasLocalPersonalData) && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-[11px] text-ink-secondary">
-          {health && (
-            <span>Cozinha online ({health.environment}) &bull; Entrega própria até 5,5 km</span>
-          )}
-          {hasLocalPersonalData && (
-            <button
-              type="button"
-              onClick={clearPersonalData}
-              className="font-semibold text-ink-secondary underline hover:text-status-error"
-            >
-              Limpar meus dados
-            </button>
-          )}
         </div>
       )}
     </div>

@@ -3,8 +3,12 @@ import {
   INITIAL_CHECKOUT_FORM_DRAFT,
   buildCreateOrderRequest,
   formatCepInput,
+  formatCpfInput,
   getFriendlyCepErrorMessage,
   isCompleteCep,
+  isValidCpf,
+  isValidEmail,
+  isValidFullName,
   stripNonDigits,
   upsertRecentOrderList,
   validateCheckoutForm,
@@ -47,6 +51,31 @@ describe('low_gear: CEP helpers, checkout validation, POST /orders payload build
     expect(formatCepInput('03195-00099')).toBe('03195-000');
     expect(isCompleteCep('03195-000')).toBe(true);
     expect(isCompleteCep('03195-00')).toBe(false);
+
+    expect(formatCpfInput('123')).toBe('123');
+    expect(formatCpfInput('123456')).toBe('123.456');
+    expect(formatCpfInput('123456789')).toBe('123.456.789');
+    expect(formatCpfInput('12345678909')).toBe('123.456.789-09');
+    expect(formatCpfInput('1234567890999')).toBe('123.456.789-09');
+
+    expect(isValidCpf('123.456.789-09')).toBe(true);
+    expect(isValidCpf('529.982.247-25')).toBe(true);
+    expect(isValidCpf('111.111.111-11')).toBe(false);
+    expect(isValidCpf('000.000.000-00')).toBe(false);
+    expect(isValidCpf('123.456.789-00')).toBe(false);
+    expect(isValidCpf('123456')).toBe(false);
+
+    expect(isValidFullName('Maria Silva')).toBe(true);
+    expect(isValidFullName('Luis')).toBe(false);
+    expect(isValidFullName('A B')).toBe(false);
+
+    expect(isValidEmail('maria@example.com')).toBe(true);
+    expect(isValidEmail('kajin.mo@hotmail.com')).toBe(true);
+    expect(isValidEmail('a@b.c')).toBe(false);
+    expect(isValidEmail('maria..silva@gmail.com')).toBe(false);
+    expect(isValidEmail('maria@dominio')).toBe(false);
+    expect(isValidEmail('maria@-dominio.com')).toBe(false);
+    expect(isValidEmail('maria@dominio.123')).toBe(false);
   });
 
   it('maps backend 422 CEP error codes into friendly pt-BR messages', () => {

@@ -177,9 +177,14 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
     });
     expect(within(accountDialog).getByText('Na Cozinha')).toBeInTheDocument();
 
-    // 3. Switch to Profile tab, verify autofill, and save PUT /me/profile
+    // 3. Switch to Profile tab, verify autofill + locked address fields, and save PUT /me/profile
     await user.click(within(accountDialog).getByRole('tab', { name: /Meu Perfil & Endereço/i }));
     expect(within(accountDialog).getByLabelText(/Nome completo/i)).toHaveValue('Carlos Mignon');
+    expect(within(accountDialog).getByLabelText(/^CPF$/i)).toHaveValue('123.456.789-09');
+    expect(within(accountDialog).getByLabelText(/Rua \/ Avenida/i)).toBeDisabled();
+    expect(within(accountDialog).getByLabelText(/Bairro/i)).toBeDisabled();
+    expect(within(accountDialog).getByLabelText(/Rua \/ Avenida/i)).toHaveClass('bg-gray-200');
+    expect(within(accountDialog).getByLabelText(/Bairro/i)).toHaveClass('bg-gray-200');
     await user.click(
       within(accountDialog).getByRole('button', { name: /Salvar perfil e endereço/i }),
     );
@@ -349,6 +354,17 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
       if (url.includes('/delivery-fee?cep=03195-000')) {
         return new Response(JSON.stringify(sampleQuote), { status: 200 });
       }
+      if (url.includes('viacep.com.br/ws/03195000/json/')) {
+        return new Response(
+          JSON.stringify({
+            logradouro: 'Rua da Mooca',
+            bairro: 'Alto da Mooca',
+            localidade: 'São Paulo',
+            uf: 'SP',
+          }),
+          { status: 200 },
+        );
+      }
       return new Response(JSON.stringify({ error: 'NotFound', detail: 'Not found' }), {
         status: 404,
       });
@@ -365,20 +381,30 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
     const accountDialog = screen.getByRole('dialog');
     await user.click(within(accountDialog).getByRole('tab', { name: /Criar minha conta/i }));
 
-    // 2. Fill registration form upfront BEFORE OTP code
+    // Street and district are permanently locked with gray background even before CEP entry
+    expect(within(accountDialog).getByLabelText(/Bairro/i)).toBeDisabled();
+    expect(within(accountDialog).getByLabelText(/Rua \/ Avenida/i)).toBeDisabled();
+    expect(within(accountDialog).getByLabelText(/Bairro/i)).toHaveClass('bg-gray-200');
+    expect(within(accountDialog).getByLabelText(/Rua \/ Avenida/i)).toHaveClass('bg-gray-200');
+
+    // 2. Fill registration form upfront BEFORE OTP code (CEP auto-fills locked street & district, CPF auto-masks)
     await user.type(within(accountDialog).getByLabelText(/Nome completo/i), 'Ana Souza');
     await user.type(
       within(accountDialog).getByLabelText(/WhatsApp \/ Telefone/i),
       '(11) 97777-6666',
     );
     await user.type(within(accountDialog).getByLabelText(/E-mail/i), 'novo@exemplo.com');
-    await user.type(within(accountDialog).getByLabelText(/CPF/i), '123.456.789-09');
+    const registerCpfInput = within(accountDialog).getByLabelText(/CPF/i);
+    await user.type(registerCpfInput, '12345678909');
+    expect(registerCpfInput).toHaveValue('123.456.789-09');
     await user.type(within(accountDialog).getByLabelText(/^CEP \*/i), '03195000');
-    await user.type(within(accountDialog).getByLabelText(/Bairro/i), 'Alto da Mooca');
-    await user.type(within(accountDialog).getByLabelText(/Rua \/ Avenida/i), 'Rua da Mooca');
+    await waitFor(() => {
+      expect(within(accountDialog).getByLabelText(/Rua \/ Avenida/i)).toHaveValue('Rua da Mooca');
+    });
+    expect(within(accountDialog).getByLabelText(/Bairro/i)).toHaveValue('Alto da Mooca');
     await user.type(within(accountDialog).getByLabelText(/^Número \*/i), '900');
 
-    // 3. Request OTP code -> enter code -> automatically creates profile via PUT /me/profile
+    // 3. Request OTP code -> verify sender email is omitted and spam warning is shown -> verify OTP
     await user.click(
       within(accountDialog).getByRole('button', {
         name: /Continuar e validar e-mail com código/i,
@@ -386,6 +412,8 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
     );
 
     const otpInput = await within(accountDialog).findByLabelText(/Código recebido no e-mail/i);
+    expect(within(accountDialog).queryByText(/nao-responda@seumignon\.com\.br/i)).toBeNull();
+    expect(within(accountDialog).getByText(/caixa de spam/i)).toBeInTheDocument();
     await user.type(otpInput, '87654321');
     await user.click(
       within(accountDialog).getByRole('button', { name: /Confirmar código e concluir cadastro/i }),
@@ -465,6 +493,10 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
 
     const notice = await within(accountDialog).findByTestId('unregistered-email-notice');
     expect(notice).toHaveTextContent('semcadastro@exemplo.com');
+    expect(notice).toHaveClass('animate-dynamic-reveal');
+    expect(within(accountDialog).getByRole('tab', { name: /Criar minha conta/i })).toHaveClass(
+      'animate-tab-shake',
+    );
     expect(
       within(accountDialog).queryByLabelText(/Código recebido no e-mail/i),
     ).not.toBeInTheDocument();
@@ -475,5 +507,90 @@ describe('high_gear: Epic E6 Optional Email OTP Login, Profile Autofill, Cloud O
       email: 'semcadastro@exemplo.com',
       create_if_missing: false,
     });
+  });
+
+  it('re-queries ViaCEP and overwrites street and district whenever the customer enters a new CEP or clicks "Buscar CEP"', async () => {
+    const user = userEvent.setup();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ status: 'ok', environment: 'prod' }), { status: 200 });
+      }
+      if (url.endsWith('/menu')) {
+        return new Response(JSON.stringify(sampleMenu), { status: 200 });
+      }
+      if (url.includes('viacep.com.br/ws/03195000/json/')) {
+        return new Response(
+          JSON.stringify({
+            logradouro: 'Rua dos Trilhos',
+            bairro: 'Alto da Mooca',
+            localidade: 'São Paulo',
+            uf: 'SP',
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('viacep.com.br/ws/01304001/json/')) {
+        return new Response(
+          JSON.stringify({
+            logradouro: 'Rua Augusta',
+            bairro: 'Consolação',
+            localidade: 'São Paulo',
+            uf: 'SP',
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ error: 'NotFound', detail: 'Not found' }), {
+        status: 404,
+      });
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Parmegiana de Mignon')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByTestId('account-modal-trigger'));
+    const accountDialog = screen.getByRole('dialog');
+    await user.click(within(accountDialog).getByRole('tab', { name: /Criar minha conta/i }));
+
+    // 1. First CEP fills Rua dos Trilhos / Alto da Mooca and locks both fields with gray background
+    const cepInput = within(accountDialog).getByLabelText(/^CEP \*/i);
+    await user.type(cepInput, '03195000');
+
+    const streetInput = within(accountDialog).getByLabelText(/Rua \/ Avenida/i);
+    const districtInput = within(accountDialog).getByLabelText(/Bairro/i);
+
+    await waitFor(() => {
+      expect(streetInput).toHaveValue('Rua dos Trilhos');
+    });
+    expect(districtInput).toHaveValue('Alto da Mooca');
+    expect(streetInput).toBeDisabled();
+    expect(districtInput).toBeDisabled();
+    expect(streetInput).toHaveClass('bg-gray-200');
+    expect(districtInput).toHaveClass('bg-gray-200');
+
+    // 2. Clearing CEP clears street/district while keeping both permanently locked; second CEP fills new values
+    await user.clear(cepInput);
+    expect(streetInput).toHaveValue('');
+    expect(districtInput).toHaveValue('');
+    expect(streetInput).toBeDisabled();
+    expect(districtInput).toBeDisabled();
+
+    await user.type(cepInput, '01304001');
+    await user.click(within(accountDialog).getByRole('button', { name: /Buscar CEP/i }));
+
+    await waitFor(() => {
+      expect(streetInput).toHaveValue('Rua Augusta');
+    });
+    expect(districtInput).toHaveValue('Consolação');
+    expect(streetInput).toBeDisabled();
+    expect(districtInput).toBeDisabled();
+    expect(streetInput).toHaveClass('bg-gray-200');
+    expect(districtInput).toHaveClass('bg-gray-200');
+    expect(within(accountDialog).getByText(/Endereço preenchido:/i)).toBeInTheDocument();
   });
 });

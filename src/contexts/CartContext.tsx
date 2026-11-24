@@ -18,6 +18,7 @@ import {
   calculateCartSubtotalCents,
   calculateOrderTotalCents,
   formatCepInput,
+  formatCpfInput,
   getFriendlyCepErrorMessage,
   isCompleteCep,
   stripNonDigits,
@@ -131,6 +132,7 @@ function readStoredCheckoutDraft(initialQuote: DeliveryFeeQuoteResponse | null):
         ...INITIAL_CHECKOUT_FORM_DRAFT,
         ...parsed,
         postalCode: parsed.postalCode || (initialQuote ? formatCepInput(initialQuote.cep) : ''),
+        documentNumber: parsed.documentNumber ? formatCpfInput(parsed.documentNumber) : '',
         district: parsed.district || initialQuote?.district || '',
       };
     }
@@ -289,12 +291,24 @@ export function CartProvider({ children }: CartProviderProps) {
     (patch: Partial<CheckoutFormDraft>) => {
       const formattedPostal =
         patch.postalCode !== undefined ? formatCepInput(patch.postalCode) : undefined;
+      const formattedDocument =
+        patch.documentNumber !== undefined ? formatCpfInput(patch.documentNumber) : undefined;
 
-      setCheckoutDraft((prev) => ({
-        ...prev,
-        ...patch,
-        ...(formattedPostal !== undefined ? { postalCode: formattedPostal } : {}),
-      }));
+      setCheckoutDraft((prev) => {
+        const cepChanged =
+          formattedPostal !== undefined &&
+          stripNonDigits(prev.postalCode) !== stripNonDigits(formattedPostal);
+        const isIncomplete =
+          formattedPostal !== undefined && stripNonDigits(formattedPostal).length < 8;
+
+        return {
+          ...prev,
+          ...patch,
+          ...(formattedPostal !== undefined ? { postalCode: formattedPostal } : {}),
+          ...(formattedDocument !== undefined ? { documentNumber: formattedDocument } : {}),
+          ...(cepChanged && isIncomplete ? { streetName: '', district: '' } : {}),
+        };
+      });
 
       if (formattedPostal !== undefined) {
         const nextPostalDigits = stripNonDigits(formattedPostal);
@@ -340,8 +354,8 @@ export function CartProvider({ children }: CartProviderProps) {
           }
           return {
             ...prev,
-            streetName: prev.streetName.trim() ? prev.streetName : (publicAddress.streetName ?? ''),
-            district: prev.district.trim() ? prev.district : (publicAddress.district ?? ''),
+            streetName: publicAddress.streetName || prev.streetName,
+            district: publicAddress.district || prev.district,
           };
         });
       });
@@ -386,7 +400,9 @@ export function CartProvider({ children }: CartProviderProps) {
         name: prev.name.trim() || profile.name || '',
         phone: prev.phone.trim() || profile.phone || '',
         email: prev.email.trim() || profile.email || '',
-        documentNumber: prev.documentNumber.trim() || profile.document_number || '',
+        documentNumber:
+          prev.documentNumber.trim() ||
+          (profile.document_number ? formatCpfInput(profile.document_number) : ''),
         postalCode:
           prev.postalCode.trim() || (addr?.postal_code ? formatCepInput(addr.postal_code) : ''),
         streetName: prev.streetName.trim() || addr?.street_name || '',

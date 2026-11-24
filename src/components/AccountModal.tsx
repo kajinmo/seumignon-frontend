@@ -12,7 +12,7 @@
  * 4. Automatic graceful cleanup when any authenticated call returns `401 Unauthorized`.
  */
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -23,6 +23,8 @@ import {
   LogOut,
   Mail,
   RotateCcw,
+  Search,
+  Sparkles,
   User,
   UserPlus,
   X,
@@ -30,8 +32,12 @@ import {
 import {
   formatCepInput,
   formatCentsToBRL,
+  formatCpfInput,
   getOrderStatusPresentation,
   isCompleteCep,
+  isValidCpf,
+  isValidEmail,
+  isValidFullName,
   stripNonDigits,
   type AuthRequestCodeResponse,
   type OrderResponse,
@@ -78,19 +84,18 @@ const EMPTY_PROFILE_FORM: ProfileFormState = {
 };
 
 function validateUpfrontRegistration(form: ProfileFormState): string | null {
-  if (form.name.trim().length < 3) {
-    return 'Informe seu nome completo.';
+  if (!isValidFullName(form.name)) {
+    return 'Informe seu nome completo (nome e sobrenome).';
   }
   const phoneDigits = stripNonDigits(form.phone);
   if (phoneDigits.length < 10 || phoneDigits.length > 11) {
     return 'Informe um WhatsApp/telefone válido com DDD (10 ou 11 dígitos).';
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
-    return 'Informe um e-mail válido para receber o código de confirmação.';
+  if (!isValidEmail(form.email)) {
+    return 'Informe um e-mail válido (ex.: nome@dominio.com) para receber o código de confirmação.';
   }
-  const docDigits = stripNonDigits(form.documentNumber);
-  if (docDigits.length !== 11 && docDigits.length !== 14) {
-    return 'Informe um CPF válido (11 dígitos).';
+  if (!isValidCpf(form.documentNumber)) {
+    return 'Informe um CPF válido.';
   }
   if (!isCompleteCep(form.postalCode)) {
     return 'Informe um CEP válido com 8 dígitos.';
@@ -107,16 +112,96 @@ function validateUpfrontRegistration(form: ProfileFormState): string | null {
   return null;
 }
 
+interface CepAddressFieldProps {
+  id: string;
+  label: string;
+  value: string;
+  isLookingUp: boolean;
+  feedback: { type: 'success' | 'error'; message: string } | null;
+  onChange: (rawCep: string) => void;
+  onSearchClick: () => void;
+}
+
+function CepAddressField({
+  id,
+  label,
+  value,
+  isLookingUp,
+  feedback,
+  onChange,
+  onSearchClick,
+}: CepAddressFieldProps) {
+  return (
+    <div className="sm:col-span-2">
+      <label htmlFor={id} className="block text-xs font-bold text-ink-primary">
+        {label}
+      </label>
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          id={id}
+          type="text"
+          inputMode="numeric"
+          maxLength={9}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Ex.: 03195-000"
+          className="w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={isLookingUp}
+          onClick={onSearchClick}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-brand-primary px-3 py-2 text-xs font-bold text-white transition hover:bg-brand-hover disabled:opacity-60"
+        >
+          {isLookingUp ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>Buscando...</span>
+            </>
+          ) : (
+            <>
+              <Search className="h-3.5 w-3.5" />
+              <span>Buscar CEP</span>
+            </>
+          )}
+        </button>
+      </div>
+      {isLookingUp && (
+        <p
+          role="status"
+          className="mt-1 flex items-center gap-1.5 text-xs font-medium text-brand-primary"
+        >
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>Buscando endereço pelo CEP...</span>
+        </p>
+      )}
+      {!isLookingUp && feedback && (
+        <p
+          role="status"
+          className={`mt-1 flex items-center gap-1.5 text-xs font-medium ${
+            feedback.type === 'success' ? 'text-status-success' : 'text-ink-secondary'
+          }`}
+        >
+          {feedback.type === 'success' && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
+          <span>{feedback.message}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: AccountModalProps) {
   const {
     session,
     isAuthenticated,
     profile,
+    isLoadingProfile,
     isNewUserWithoutProfile,
     authNotice,
     clearAuthNotice,
     requestOtpCode,
     verifyOtpCode,
+    refreshProfile,
     saveProfile,
     handleUnauthorized,
     logout,
@@ -133,6 +218,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
   const [otpChallenge, setOtpChallenge] = useState<AuthRequestCodeResponse | null>(null);
   const [otpCodeInput, setOtpCodeInput] = useState<string>('');
   const [registrationPromptNotice, setRegistrationPromptNotice] = useState<string | null>(null);
+  const [redirectAnimationKey, setRedirectAnimationKey] = useState<number>(0);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(false);
 
@@ -147,10 +233,31 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
   const [profileSuccess, setProfileSuccess] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
 
+  const [isLookingUpCep, setIsLookingUpCep] = useState<boolean>(false);
+  const [cepLookupFeedback, setCepLookupFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const cepLookupAbortRef = useRef<AbortController | null>(null);
+  const lastLookedUpCepRef = useRef<{ register: string; profile: string }>({
+    register: '',
+    profile: '',
+  });
+
+  useEffect(() => {
+    return () => {
+      cepLookupAbortRef.current?.abort();
+    };
+  }, []);
+
   useEffect(() => {
     if (!isOpen) {
+      cepLookupAbortRef.current?.abort();
+      setIsLookingUpCep(false);
+      setCepLookupFeedback(null);
       setAuthError(null);
       setRegistrationPromptNotice(null);
+      setRedirectAnimationKey(0);
       setProfileSuccess(null);
       setProfileError(null);
       setOrdersError(null);
@@ -177,17 +284,28 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
 
   useEffect(() => {
     if (!profile) {
-      setProfileForm({
-        name: checkoutDraft.name,
-        phone: checkoutDraft.phone,
-        email: session?.email ?? checkoutDraft.email,
-        documentNumber: checkoutDraft.documentNumber,
-        postalCode: checkoutDraft.postalCode,
-        streetName: checkoutDraft.streetName,
-        streetNumber: checkoutDraft.streetNumber,
-        district: checkoutDraft.district,
-        complement: checkoutDraft.complement,
-        reference: checkoutDraft.reference,
+      setProfileForm((prev) => {
+        const hasLocalInput = Boolean(
+          prev.name.trim() ||
+          prev.phone.trim() ||
+          prev.documentNumber.trim() ||
+          prev.postalCode.trim(),
+        );
+        if (hasLocalInput) {
+          return prev;
+        }
+        return {
+          name: checkoutDraft.name,
+          phone: checkoutDraft.phone,
+          email: session?.email ?? checkoutDraft.email,
+          documentNumber: formatCpfInput(checkoutDraft.documentNumber),
+          postalCode: checkoutDraft.postalCode,
+          streetName: checkoutDraft.streetName,
+          streetNumber: checkoutDraft.streetNumber,
+          district: checkoutDraft.district,
+          complement: checkoutDraft.complement,
+          reference: checkoutDraft.reference,
+        };
       });
       return;
     }
@@ -196,7 +314,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
       name: profile.name ?? '',
       phone: profile.phone ?? '',
       email: profile.email ?? session?.email ?? '',
-      documentNumber: profile.document_number ?? '',
+      documentNumber: profile.document_number ? formatCpfInput(profile.document_number) : '',
       postalCode: addr?.postal_code ? formatCepInput(addr.postal_code) : '',
       streetName: addr?.street_name ?? '',
       streetNumber: addr?.street_number ?? '',
@@ -205,6 +323,31 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
       reference: addr?.reference ?? '',
     });
   }, [profile, session?.email, checkoutDraft]);
+
+  // Retry loading profile when opening the Profile tab if it wasn't loaded yet
+  useEffect(() => {
+    if (
+      !isOpen ||
+      !isAuthenticated ||
+      activeTab !== 'profile' ||
+      profile ||
+      isLoadingProfile ||
+      isNewUserWithoutProfile ||
+      pendingRegistrationPayload
+    ) {
+      return;
+    }
+    void refreshProfile();
+  }, [
+    isOpen,
+    isAuthenticated,
+    activeTab,
+    profile,
+    isLoadingProfile,
+    isNewUserWithoutProfile,
+    pendingRegistrationPayload,
+    refreshProfile,
+  ]);
 
   const fetchMyOrders = useCallback(
     async (accessToken: string, signal?: AbortSignal) => {
@@ -248,37 +391,122 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
     return null;
   }
 
-  function handleSwitchUnauthMode(mode: UnauthMode) {
+  function handleSwitchUnauthMode(mode: UnauthMode, emphasizeSwitch = false) {
     setUnauthMode(mode);
     setOtpChallenge(null);
     setPendingRegistrationPayload(null);
     setOtpCodeInput('');
     setAuthError(null);
     setRegistrationPromptNotice(null);
+    if (mode === 'register' && emphasizeSwitch) {
+      setRedirectAnimationKey((prev) => prev + 1);
+    } else if (mode === 'login') {
+      setRedirectAnimationKey(0);
+    }
     if (mode === 'register' && emailInput.trim() && !registerForm.email.trim()) {
       setRegisterForm((prev) => ({ ...prev, email: emailInput.trim() }));
     }
   }
 
-  function handleRegisterCepChange(rawCep: string) {
-    const formatted = formatCepInput(rawCep);
-    setRegisterForm((prev) => ({ ...prev, postalCode: formatted }));
-
-    const digits = stripNonDigits(formatted);
-    if (digits.length === 8) {
-      void lookupCepAddressPublic(digits).then((publicAddr) => {
-        if (!publicAddr) return;
-        setRegisterForm((prev) => {
-          if (stripNonDigits(prev.postalCode) !== digits) {
-            return prev;
-          }
-          return {
-            ...prev,
-            streetName: prev.streetName.trim() ? prev.streetName : (publicAddr.streetName ?? ''),
-            district: prev.district.trim() ? prev.district : (publicAddr.district ?? ''),
-          };
-        });
+  async function lookupAndFillAddressForForm(rawCep: string, target: 'register' | 'profile') {
+    const digits = stripNonDigits(rawCep);
+    if (digits.length !== 8) {
+      setCepLookupFeedback({
+        type: 'error',
+        message: 'Digite os 8 números do CEP para buscar o endereço.',
       });
+      return;
+    }
+
+    cepLookupAbortRef.current?.abort();
+    const controller = new AbortController();
+    cepLookupAbortRef.current = controller;
+    lastLookedUpCepRef.current[target] = digits;
+
+    setIsLookingUpCep(true);
+    setCepLookupFeedback(null);
+
+    try {
+      const publicAddr = await lookupCepAddressPublic(digits, controller.signal);
+      if (controller.signal.aborted) return;
+
+      if (!publicAddr || (!publicAddr.streetName && !publicAddr.district)) {
+        const clearAddress = (prev: ProfileFormState): ProfileFormState =>
+          stripNonDigits(prev.postalCode) === digits
+            ? { ...prev, streetName: '', district: '' }
+            : prev;
+
+        if (target === 'register') {
+          setRegisterForm(clearAddress);
+        } else {
+          setProfileForm(clearAddress);
+        }
+
+        setCepLookupFeedback({
+          type: 'error',
+          message: 'CEP não localizado. Verifique o número digitado e tente novamente.',
+        });
+        return;
+      }
+
+      const applyUpdate = (prev: ProfileFormState): ProfileFormState => {
+        if (stripNonDigits(prev.postalCode) !== digits) {
+          return prev;
+        }
+        return {
+          ...prev,
+          streetName: publicAddr.streetName ?? '',
+          district: publicAddr.district ?? '',
+        };
+      };
+
+      if (target === 'register') {
+        setRegisterForm(applyUpdate);
+      } else {
+        setProfileForm(applyUpdate);
+      }
+
+      const summary = [publicAddr.streetName, publicAddr.district].filter(Boolean).join(' • ');
+      setCepLookupFeedback({
+        type: 'success',
+        message: summary ? `Endereço preenchido: ${summary}` : 'Endereço atualizado pelo CEP.',
+      });
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsLookingUpCep(false);
+      }
+    }
+  }
+
+  function handleFormCepChange(rawCep: string, target: 'register' | 'profile') {
+    const formatted = formatCepInput(rawCep);
+    const digits = stripNonDigits(formatted);
+
+    const updatePostal = (prev: ProfileFormState): ProfileFormState => {
+      const cepChanged = stripNonDigits(prev.postalCode) !== digits;
+      return {
+        ...prev,
+        postalCode: formatted,
+        ...(cepChanged && digits.length < 8 ? { streetName: '', district: '' } : {}),
+      };
+    };
+
+    if (target === 'register') {
+      setRegisterForm(updatePostal);
+    } else {
+      setProfileForm(updatePostal);
+    }
+
+    setCepLookupFeedback(null);
+    if (digits.length < 8) {
+      cepLookupAbortRef.current?.abort();
+      setIsLookingUpCep(false);
+      lastLookedUpCepRef.current[target] = '';
+      return;
+    }
+
+    if (digits !== lastLookedUpCepRef.current[target]) {
+      void lookupAndFillAddressForForm(formatted, target);
     }
   }
 
@@ -289,8 +517,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
     clearAuthNotice();
 
     const normalized = emailInput.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
-      setAuthError('Informe um e-mail válido para receber o código de acesso.');
+    if (!isValidEmail(normalized)) {
+      setAuthError(
+        'Informe um e-mail válido (ex.: nome@dominio.com) para receber o código de acesso.',
+      );
       return;
     }
 
@@ -312,6 +542,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
         setRegistrationPromptNotice(
           `O e-mail ${normalized} ainda não possui cadastro. Preencha seus dados abaixo para criar sua conta e receber o código de confirmação!`,
         );
+        setRedirectAnimationKey((prev) => prev + 1);
         setAuthError(null);
       } else if (err instanceof ApiClientError) {
         setAuthError(err.detail);
@@ -399,10 +630,18 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
           setProfileSuccess(
             'Cadastro concluído! Seus dados e endereço padrão já estão salvos para os próximos pedidos.',
           );
-        } catch {
+        } catch (saveErr) {
+          setProfileForm({
+            ...registerForm,
+            email: pendingRegistrationPayload.email,
+            documentNumber: formatCpfInput(registerForm.documentNumber),
+            postalCode: formatCepInput(registerForm.postalCode),
+          });
           setActiveTab('profile');
           setProfileError(
-            'Sua conta foi validada, mas não foi possível salvar seus dados agora. Tente salvar novamente abaixo.',
+            saveErr instanceof ApiClientError
+              ? `Sua conta foi validada, mas não foi possível salvar seus dados (${saveErr.detail}). Revise e clique em salvar abaixo.`
+              : 'Sua conta foi validada, mas não foi possível salvar seus dados agora. Revise e clique em salvar abaixo.',
           );
         }
         setPendingRegistrationPayload(null);
@@ -429,6 +668,17 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
 
     setProfileError(null);
     setProfileSuccess(null);
+
+    if (profileForm.name.trim() && !isValidFullName(profileForm.name)) {
+      setProfileError('Informe seu nome completo (nome e sobrenome).');
+      return;
+    }
+
+    if (profileForm.documentNumber.trim() && !isValidCpf(profileForm.documentNumber)) {
+      setProfileError('Informe um CPF válido.');
+      return;
+    }
+
     setIsSavingProfile(true);
 
     try {
@@ -541,6 +791,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                       <span>Já tenho conta</span>
                     </button>
                     <button
+                      key={`register-tab-${String(redirectAnimationKey)}`}
                       type="button"
                       role="tab"
                       aria-selected={unauthMode === 'register'}
@@ -549,6 +800,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         unauthMode === 'register'
                           ? 'bg-brand-primary text-white shadow-2xs'
                           : 'text-ink-secondary hover:text-ink-primary'
+                      } ${
+                        redirectAnimationKey > 0 && unauthMode === 'register'
+                          ? 'animate-tab-shake ring-2 ring-brand-primary/40'
+                          : ''
                       }`}
                     >
                       <UserPlus className="h-3.5 w-3.5" />
@@ -556,19 +811,30 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                     </button>
                   </div>
 
-                  <p className="rounded-xl border border-border bg-subtle/60 p-3 text-xs leading-relaxed text-ink-secondary">
-                    O cadastro é <strong>100% opcional</strong>: você também pode pedir direto como
-                    convidado no checkout. Criando sua conta, seu endereço padrão e histórico ficam
-                    salvos na nuvem sem precisar decorar senha.
-                  </p>
+                  <div
+                    key={`optional-banner-${unauthMode}-${String(redirectAnimationKey)}`}
+                    className={`animate-dynamic-reveal flex items-start gap-2.5 rounded-xl border p-3 text-xs leading-relaxed transition ${
+                      redirectAnimationKey > 0 && unauthMode === 'register'
+                        ? 'border-brand-primary/40 bg-brand-primary/5 text-ink-primary shadow-2xs'
+                        : 'border-border bg-subtle/60 text-ink-secondary'
+                    }`}
+                  >
+                    <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary" />
+                    <p>
+                      O cadastro é <strong>100% opcional</strong>: você também pode pedir direto
+                      como convidado no checkout. Criando sua conta, seu endereço padrão e histórico
+                      ficam salvos na nuvem sem precisar decorar senha.
+                    </p>
+                  </div>
                 </>
               )}
 
               {registrationPromptNotice && (
                 <div
+                  key={`notice-${String(redirectAnimationKey)}`}
                   role="status"
                   data-testid="unregistered-email-notice"
-                  className="flex items-start gap-2 rounded-xl border border-brand-primary/30 bg-brand-primary/10 p-3 text-xs font-medium text-ink-primary"
+                  className="animate-dynamic-reveal flex items-start gap-2 rounded-xl border border-brand-primary/40 bg-brand-primary/10 p-3 text-xs font-medium text-ink-primary shadow-2xs"
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary" />
                   <span>{registrationPromptNotice}</span>
@@ -588,15 +854,25 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
               {otpChallenge ? (
                 /* Step 2 (shared OTP verification for Login or Sign-Up) */
                 <form onSubmit={(e) => void handleVerifyOtp(e)} noValidate className="space-y-4">
-                  <div className="rounded-xl border border-brand-primary/30 bg-brand-primary/5 p-3 text-xs text-ink-primary">
-                    Enviamos um código de verificação de{' '}
-                    <strong>Seu Mignon &lt;nao-responda@seumignon.com.br&gt;</strong> para{' '}
-                    <strong>{otpChallenge.email}</strong> (expira em cerca de 3 minutos).
+                  <div className="space-y-2 rounded-xl border border-brand-primary/30 bg-brand-primary/5 p-3 text-xs text-ink-primary">
+                    <p>
+                      Enviamos um código de verificação para <strong>{otpChallenge.email}</strong>{' '}
+                      (expira em cerca de 3 minutos).
+                    </p>
+                    <p
+                      role="note"
+                      className="flex items-start gap-1.5 rounded-lg border border-amber-300/70 bg-amber-50 px-2.5 py-2 font-semibold text-amber-900"
+                    >
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                      <span>
+                        Não encontrou o e-mail? Olhe também na sua caixa de spam ou lixo eletrônico.
+                      </span>
+                    </p>
                     {pendingRegistrationPayload && (
-                      <span className="mt-1 block font-semibold text-brand-primary">
+                      <p className="font-semibold text-brand-primary">
                         Assim que confirmar o código, finalizaremos seu cadastro com os dados
                         informados.
-                      </span>
+                      </p>
                     )}
                   </div>
 
@@ -710,7 +986,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                     Ainda não tem cadastro?{' '}
                     <button
                       type="button"
-                      onClick={() => handleSwitchUnauthMode('register')}
+                      onClick={() => handleSwitchUnauthMode('register', true)}
                       className="font-bold text-brand-primary underline"
                     >
                       Preencher meus dados agora
@@ -735,6 +1011,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                       <input
                         id="register-name"
                         type="text"
+                        maxLength={64}
                         value={registerForm.name}
                         onChange={(e) =>
                           setRegisterForm((prev) => ({ ...prev, name: e.target.value }))
@@ -793,35 +1070,32 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="register-document"
                         type="text"
                         inputMode="numeric"
+                        maxLength={14}
                         value={registerForm.documentNumber}
                         onChange={(e) =>
-                          setRegisterForm((prev) => ({ ...prev, documentNumber: e.target.value }))
+                          setRegisterForm((prev) => ({
+                            ...prev,
+                            documentNumber: formatCpfInput(e.target.value),
+                          }))
                         }
                         placeholder="Ex.: 123.456.789-09"
                         className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                       />
                     </div>
 
-                    <div>
-                      <label
-                        htmlFor="register-cep"
-                        className="block text-xs font-bold text-ink-primary"
-                      >
-                        CEP *
-                      </label>
-                      <input
-                        id="register-cep"
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={9}
-                        value={registerForm.postalCode}
-                        onChange={(e) => handleRegisterCepChange(e.target.value)}
-                        placeholder="Ex.: 03195-000"
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
-                      />
-                    </div>
+                    <CepAddressField
+                      id="register-cep"
+                      label="CEP *"
+                      value={registerForm.postalCode}
+                      isLookingUp={isLookingUpCep}
+                      feedback={cepLookupFeedback}
+                      onChange={(raw) => handleFormCepChange(raw, 'register')}
+                      onSearchClick={() =>
+                        void lookupAndFillAddressForForm(registerForm.postalCode, 'register')
+                      }
+                    />
 
-                    <div>
+                    <div className="sm:col-span-2">
                       <label
                         htmlFor="register-district"
                         className="block text-xs font-bold text-ink-primary"
@@ -832,11 +1106,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="register-district"
                         type="text"
                         value={registerForm.district}
-                        onChange={(e) =>
-                          setRegisterForm((prev) => ({ ...prev, district: e.target.value }))
-                        }
-                        placeholder="Ex.: Alto da Mooca"
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                        disabled
+                        readOnly
+                        placeholder="Preenchido automaticamente pelo CEP"
+                        className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                       />
                     </div>
 
@@ -851,11 +1124,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="register-street"
                         type="text"
                         value={registerForm.streetName}
-                        onChange={(e) =>
-                          setRegisterForm((prev) => ({ ...prev, streetName: e.target.value }))
-                        }
-                        placeholder="Ex.: Rua dos Trilhos"
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                        disabled
+                        readOnly
+                        placeholder="Preenchido automaticamente pelo CEP"
+                        className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                       />
                     </div>
 
@@ -1092,6 +1364,11 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                       );
                     })}
                 </div>
+              ) : isLoadingProfile && !profile ? (
+                <div className="flex items-center justify-center gap-2 py-8 text-xs text-ink-secondary">
+                  <Loader2 className="h-4 w-4 animate-spin text-brand-primary" />
+                  <span>Carregando seus dados salvos...</span>
+                </div>
               ) : (
                 <form onSubmit={(e) => void handleSaveProfile(e)} noValidate className="space-y-4">
                   {isNewUserWithoutProfile && !profileSuccess && (
@@ -1135,10 +1412,12 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                       <input
                         id="profile-name"
                         type="text"
+                        maxLength={64}
                         value={profileForm.name}
                         onChange={(e) =>
                           setProfileForm((prev) => ({ ...prev, name: e.target.value }))
                         }
+                        placeholder="Ex.: Maria Silva"
                         className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                       />
                     </div>
@@ -1172,36 +1451,29 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="profile-document"
                         type="text"
                         inputMode="numeric"
+                        maxLength={14}
                         value={profileForm.documentNumber}
-                        onChange={(e) =>
-                          setProfileForm((prev) => ({ ...prev, documentNumber: e.target.value }))
-                        }
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor="profile-cep"
-                        className="block text-xs font-bold text-ink-primary"
-                      >
-                        CEP Padrão
-                      </label>
-                      <input
-                        id="profile-cep"
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={9}
-                        value={profileForm.postalCode}
                         onChange={(e) =>
                           setProfileForm((prev) => ({
                             ...prev,
-                            postalCode: formatCepInput(e.target.value),
+                            documentNumber: formatCpfInput(e.target.value),
                           }))
                         }
                         className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                       />
                     </div>
+
+                    <CepAddressField
+                      id="profile-cep"
+                      label="CEP Padrão"
+                      value={profileForm.postalCode}
+                      isLookingUp={isLookingUpCep}
+                      feedback={cepLookupFeedback}
+                      onChange={(raw) => handleFormCepChange(raw, 'profile')}
+                      onSearchClick={() =>
+                        void lookupAndFillAddressForForm(profileForm.postalCode, 'profile')
+                      }
+                    />
 
                     <div className="sm:col-span-2">
                       <label
@@ -1214,10 +1486,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="profile-street"
                         type="text"
                         value={profileForm.streetName}
-                        onChange={(e) =>
-                          setProfileForm((prev) => ({ ...prev, streetName: e.target.value }))
-                        }
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                        disabled
+                        readOnly
+                        placeholder="Preenchido automaticamente pelo CEP"
+                        className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                       />
                     </div>
 
@@ -1250,10 +1522,10 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                         id="profile-district"
                         type="text"
                         value={profileForm.district}
-                        onChange={(e) =>
-                          setProfileForm((prev) => ({ ...prev, district: e.target.value }))
-                        }
-                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                        disabled
+                        readOnly
+                        placeholder="Preenchido automaticamente pelo CEP"
+                        className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                       />
                     </div>
 

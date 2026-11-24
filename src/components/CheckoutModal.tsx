@@ -368,6 +368,7 @@ export function CheckoutModal({ isOpen, onClose, onNavigateToOrderStatus }: Chec
                     <input
                       id="checkout-name"
                       type="text"
+                      maxLength={64}
                       value={checkoutDraft.name}
                       onChange={(e) => updateCheckoutDraft({ name: e.target.value })}
                       placeholder="Ex.: Maria Silva"
@@ -429,12 +430,13 @@ export function CheckoutModal({ isOpen, onClose, onNavigateToOrderStatus }: Chec
                       htmlFor="checkout-document"
                       className="block text-xs font-bold text-ink-primary"
                     >
-                      CPF (apenas números) *
+                      CPF *
                     </label>
                     <input
                       id="checkout-document"
                       type="text"
                       inputMode="numeric"
+                      maxLength={14}
                       value={checkoutDraft.documentNumber}
                       onChange={(e) => updateCheckoutDraft({ documentNumber: e.target.value })}
                       placeholder="Ex.: 123.456.789-09"
@@ -482,9 +484,10 @@ export function CheckoutModal({ isOpen, onClose, onNavigateToOrderStatus }: Chec
                       id="checkout-street"
                       type="text"
                       value={checkoutDraft.streetName}
-                      onChange={(e) => updateCheckoutDraft({ streetName: e.target.value })}
-                      placeholder="Ex.: Rua Exemplo"
-                      className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      disabled
+                      readOnly
+                      placeholder="Preenchido automaticamente pelo CEP"
+                      className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                     />
                     {fieldErrors.streetName && (
                       <p className="mt-1 text-xs font-semibold text-status-error">
@@ -526,9 +529,10 @@ export function CheckoutModal({ isOpen, onClose, onNavigateToOrderStatus }: Chec
                       id="checkout-district"
                       type="text"
                       value={checkoutDraft.district}
-                      onChange={(e) => updateCheckoutDraft({ district: e.target.value })}
-                      placeholder="Ex.: Alto da Mooca"
-                      className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      disabled
+                      readOnly
+                      placeholder="Preenchido automaticamente pelo CEP"
+                      className="mt-1 w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-2 text-sm text-gray-600 focus:outline-none"
                     />
                     {fieldErrors.district && (
                       <p className="mt-1 text-xs font-semibold text-status-error">

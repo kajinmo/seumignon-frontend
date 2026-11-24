@@ -19,7 +19,6 @@ import {
   getCategoryShortcutLabel,
   normalizeSearchText,
   type CategoryShortcutId,
-  type HealthResponse,
   type MenuItem,
   type MenuResponse,
   type OrderResponse,
@@ -72,7 +71,6 @@ function parseOrderIdFromPath(pathname: string): string | null {
 interface StorefrontContentProps {
   theme: ThemeId;
   onSelectTheme: (theme: ThemeId) => void;
-  health: HealthResponse | null;
   menu: MenuResponse | null;
   isLoading: boolean;
   apiError: string | null;
@@ -82,7 +80,6 @@ interface StorefrontContentProps {
 function StorefrontContent({
   theme,
   onSelectTheme,
-  health,
   menu,
   isLoading,
   apiError,
@@ -365,14 +362,9 @@ function StorefrontContent({
                   ) : (
                     filteredSections.map((section) => (
                       <section key={section.categoryName} aria-label={section.categoryName}>
-                        <div className="mb-3 flex items-baseline justify-between">
-                          <h2 className="font-display text-2xl font-bold uppercase tracking-tight text-ink-primary">
-                            {section.categoryName}
-                          </h2>
-                          <span className="text-xs font-medium text-ink-secondary">
-                            {section.items.length} {section.items.length === 1 ? 'opção' : 'opções'}
-                          </span>
-                        </div>
+                        <h2 className="mb-3 font-display text-2xl font-bold uppercase tracking-tight text-ink-primary">
+                          {section.categoryName}
+                        </h2>
 
                         <div className="grid gap-3.5 sm:grid-cols-2">
                           {section.items.map((item) => (
@@ -396,7 +388,6 @@ function StorefrontContent({
                 >
                   <CartPanel
                     theme={theme}
-                    health={health}
                     onProceedToCheckout={() => setIsCheckoutModalOpen(true)}
                     onTrackOrder={navigateToOrderStatus}
                     idPrefix="desktop-cart"
@@ -442,7 +433,6 @@ function StorefrontContent({
               >
                 <CartPanel
                   theme={theme}
-                  health={health}
                   idPrefix="mobile-cart"
                   onCloseDrawer={() => setIsMobileCartDrawerOpen(false)}
                   onTrackOrder={(orderId) => {
@@ -488,7 +478,6 @@ export interface AppProps {
 
 export function App({ orderPollIntervalMs }: AppProps = {}) {
   const [theme, setTheme] = useState<ThemeId>(getInitialTheme);
-  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [menu, setMenu] = useState<MenuResponse | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -509,11 +498,7 @@ export function App({ orderPollIntervalMs }: AppProps = {}) {
       setIsLoading(true);
       setApiError(null);
       try {
-        const [healthRes, menuRes] = await Promise.all([
-          apiClient.getHealth(controller.signal),
-          apiClient.getMenu(controller.signal),
-        ]);
-        setHealth(healthRes);
+        const menuRes = await apiClient.getMenu(controller.signal);
         setMenu(menuRes);
       } catch (err) {
         if (controller.signal.aborted) {
@@ -544,7 +529,6 @@ export function App({ orderPollIntervalMs }: AppProps = {}) {
         <StorefrontContent
           theme={theme}
           onSelectTheme={setTheme}
-          health={health}
           menu={menu}
           isLoading={isLoading}
           apiError={apiError}

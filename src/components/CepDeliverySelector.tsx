@@ -39,12 +39,13 @@ export function CepDeliverySelector({
 }: CepDeliverySelectorProps) {
   const [isEditingCep, setIsEditingCep] = useState<boolean>(false);
   const lastAutoQuotedDigitsRef = useRef<string>('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   const currentDigits = stripNonDigits(postalCode);
   const quotedDigits = deliveryQuote ? stripNonDigits(deliveryQuote.cep) : '';
   const hasMatchingQuote = Boolean(deliveryQuote && quotedDigits === currentDigits);
 
-  // Automatically trigger `GET /delivery-fee` once 8 digits are entered
+  // Automatically trigger `GET /delivery-fee` once 8 digits are entered or changed
   useEffect(() => {
     if (!isCompleteCep(postalCode)) {
       lastAutoQuotedDigitsRef.current = '';
@@ -110,11 +111,19 @@ export function CepDeliverySelector({
       {showInput && (
         <div className="mt-2 flex items-center gap-2">
           <div className="relative flex-1">
-            <Search
-              aria-hidden="true"
-              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-secondary"
-            />
+            {isQuoting ? (
+              <Loader2
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-brand-primary"
+              />
+            ) : (
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-secondary"
+              />
+            )}
             <input
+              ref={inputRef}
               id={inputId}
               type="text"
               inputMode="numeric"
@@ -137,16 +146,30 @@ export function CepDeliverySelector({
             {isQuoting ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Calculando...</span>
+                <span>Buscando...</span>
               </>
             ) : (
-              <span>Calcular</span>
+              <>
+                <Search className="h-3.5 w-3.5" />
+                <span>Buscar CEP</span>
+              </>
             )}
           </button>
         </div>
       )}
 
-      {hasMatchingQuote && deliveryQuote && (
+      {isQuoting && (
+        <div
+          role="status"
+          data-testid={`${idPrefix}-cep-loading`}
+          className="mt-2 flex items-center gap-1.5 text-xs font-medium text-brand-primary"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Buscando CEP e calculando taxa de entrega...</span>
+        </div>
+      )}
+
+      {!isQuoting && hasMatchingQuote && deliveryQuote && (
         <div
           data-testid={`${idPrefix}-cep-quote-card`}
           className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-brand-primary/40 bg-surface px-3 py-2"
@@ -168,7 +191,15 @@ export function CepDeliverySelector({
           {!alwaysShowInput && (
             <button
               type="button"
-              onClick={() => setIsEditingCep((prev) => !prev)}
+              onClick={() => {
+                setIsEditingCep((prev) => {
+                  const next = !prev;
+                  if (next) {
+                    window.setTimeout(() => inputRef.current?.focus(), 0);
+                  }
+                  return next;
+                });
+              }}
               className="rounded-full border border-border bg-subtle px-2.5 py-1 text-xs font-semibold text-brand-primary transition hover:bg-brand-primary hover:text-white"
             >
               {isEditingCep ? 'Fechar' : 'Trocar CEP'}

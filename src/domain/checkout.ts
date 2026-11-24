@@ -74,6 +74,78 @@ export function stripNonDigits(raw: string): string {
 }
 
 /**
+ * Formats numeric input progressively into Brazilian CPF mask (`000.000.000-00`),
+ * capped at 11 digits.
+ */
+export function formatCpfInput(raw: string): string {
+  const digits = stripNonDigits(raw).slice(0, 11);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}.${digits.slice(3)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6)}`;
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
+}
+
+/**
+ * Validates that a customer name contains at least first name and surname
+ * (required by Pagar.me Hosted Checkout, max 64 characters).
+ */
+export function isValidFullName(raw: string): boolean {
+  const normalized = raw.trim().replace(/\s+/g, ' ');
+  if (normalized.length < 3 || normalized.length > 64) return false;
+  const parts = normalized.split(' ').filter((part) => part.length > 0);
+  return parts.length >= 2 && parts[0].length >= 2 && parts[parts.length - 1].length >= 2;
+}
+
+/**
+ * Validates Brazilian CPF using the official Modulo-11 check digits algorithm,
+ * rejecting non-11-digit inputs and repeated-digit sequences (e.g., `111.111.111-11`).
+ */
+export function isValidCpf(raw: string): boolean {
+  const digits = stripNonDigits(raw);
+  if (digits.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(digits)) return false;
+
+  const calcCheckDigit = (sliceLength: number): number => {
+    let sum = 0;
+    for (let i = 0; i < sliceLength; i += 1) {
+      sum += Number(digits[i]) * (sliceLength + 1 - i);
+    }
+    const remainder = (sum * 10) % 11;
+    return remainder === 10 ? 0 : remainder;
+  };
+
+  return calcCheckDigit(9) === Number(digits[9]) && calcCheckDigit(10) === Number(digits[10]);
+}
+
+/**
+ * Validates email syntax strictly for frontend UX (rejecting spaces, consecutive dots,
+ * malformed domain labels, or invalid TLDs like single-letter/numeric extensions).
+ */
+export function isValidEmail(raw: string): boolean {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized.length < 6 || normalized.length > 254) return false;
+  if (/\s/.test(normalized) || normalized.includes('..')) return false;
+
+  const parts = normalized.split('@');
+  if (parts.length !== 2) return false;
+
+  const [local, domain] = parts;
+  if (!local || local.length > 64 || !domain || domain.length > 253) return false;
+  if (!/^[a-z0-9](?:[a-z0-9._%+-]*[a-z0-9])?$/i.test(local)) return false;
+
+  const labels = domain.split('.');
+  if (labels.length < 2) return false;
+
+  const tld = labels[labels.length - 1];
+  if (!/^[a-z]{2,24}$/i.test(tld)) return false;
+
+  return labels.every(
+    (label) =>
+      label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  );
+}
+
+/**
  * Validates customer and delivery address fields (including authoritative CEP delivery quote)
  * before enabling/submitting `POST /orders`.
  */
@@ -83,9 +155,8 @@ export function validateCheckoutForm(
 ): CheckoutValidationResult {
   const errors: CheckoutFieldErrors = {};
 
-  const trimmedName = draft.name.trim();
-  if (trimmedName.length < 3) {
-    errors.name = 'Informe seu nome completo.';
+  if (!isValidFullName(draft.name)) {
+    errors.name = 'Informe seu nome completo (nome e sobrenome).';
   }
 
   const digitsPhone = stripNonDigits(draft.phone);
@@ -93,14 +164,12 @@ export function validateCheckoutForm(
     errors.phone = 'Informe um WhatsApp/telefone válido com DDD (10 ou 11 dígitos).';
   }
 
-  const trimmedEmail = draft.email.trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+  if (!isValidEmail(draft.email)) {
     errors.email = 'Informe um e-mail válido para receber o comprovante.';
   }
 
-  const digitsDoc = stripNonDigits(draft.documentNumber);
-  if (digitsDoc.length !== 11 && digitsDoc.length !== 14) {
-    errors.documentNumber = 'Informe um CPF válido (11 dígitos).';
+  if (!isValidCpf(draft.documentNumber)) {
+    errors.documentNumber = 'Informe um CPF válido.';
   }
 
   const digitsCep = stripNonDigits(draft.postalCode);

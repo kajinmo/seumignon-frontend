@@ -120,6 +120,20 @@ describe('high_gear: Epic E5 Authoritative CEP Delivery Fee & Guest Pagar.me Hos
           headers: { 'Content-Type': 'application/json' },
         });
       }
+      if (url.includes('viacep.com.br/ws/03195000/json/')) {
+        return new Response(
+          JSON.stringify({
+            logradouro: 'Rua Exemplo',
+            bairro: 'Alto da Mooca',
+            localidade: 'São Paulo',
+            uf: 'SP',
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
       if (url.endsWith('/orders') && init?.method === 'POST') {
         capturedOrderPayload = JSON.parse(String(init.body)) as CreateOrderRequest;
         capturedAuthHeader = new Headers(init.headers).get('Authorization');
@@ -181,17 +195,27 @@ describe('high_gear: Epic E5 Authoritative CEP Delivery Fee & Guest Pagar.me Hos
       within(checkoutDialog).getByRole('heading', { name: /Finalizar Pedido/i }),
     ).toBeInTheDocument();
     expect(within(checkoutDialog).getByLabelText(/CEP de entrega/i)).toHaveValue('03195-000');
-    expect(within(checkoutDialog).getByLabelText(/Bairro \*/i)).toHaveValue('Alto da Mooca');
+    const checkoutStreetInput = within(checkoutDialog).getByLabelText(/Rua \/ Avenida/i);
+    const checkoutDistrictInput = within(checkoutDialog).getByLabelText(/Bairro \*/i);
+    expect(checkoutStreetInput).toBeDisabled();
+    expect(checkoutDistrictInput).toBeDisabled();
+    expect(checkoutStreetInput).toHaveClass('bg-gray-200');
+    expect(checkoutDistrictInput).toHaveClass('bg-gray-200');
+    await waitFor(() => {
+      expect(checkoutStreetInput).toHaveValue('Rua Exemplo');
+    });
+    expect(checkoutDistrictInput).toHaveValue('Alto da Mooca');
 
-    // 5. Fill customer and remaining address fields
+    // 5. Fill customer and remaining address fields (street and district are locked & CEP-driven)
     await user.type(within(checkoutDialog).getByLabelText(/Nome completo/i), 'Maria Silva');
     await user.type(
       within(checkoutDialog).getByLabelText(/WhatsApp \/ Telefone com DDD/i),
       '(11) 99999-8888',
     );
     await user.type(within(checkoutDialog).getByLabelText(/E-mail/i), 'maria@example.com');
-    await user.type(within(checkoutDialog).getByLabelText(/CPF/i), '123.456.789-09');
-    await user.type(within(checkoutDialog).getByLabelText(/Rua \/ Avenida/i), 'Rua Exemplo');
+    const checkoutCpfInput = within(checkoutDialog).getByLabelText(/CPF/i);
+    await user.type(checkoutCpfInput, '12345678909');
+    expect(checkoutCpfInput).toHaveValue('123.456.789-09');
     await user.type(within(checkoutDialog).getByLabelText(/^Número \*/i), '123');
     await user.type(within(checkoutDialog).getByLabelText(/Complemento/i), 'Apto 42');
     await user.type(
