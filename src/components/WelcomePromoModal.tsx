@@ -19,7 +19,7 @@ interface WelcomePromoModalProps {
 
 export function WelcomePromoModal({
   config,
-  theme = 'blue-bistro',
+  theme = 'red-kraft',
   isOpen,
   onClose,
 }: WelcomePromoModalProps) {

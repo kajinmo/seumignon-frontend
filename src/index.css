@@ -3,28 +3,13 @@
 @tailwind utilities;
 
 /**
- * Epic E0 Dual-Theme Design Tokens
- * Theme A ("blue-bistro"): The Original Mignon — Royal Blue (#10388B) on Warm Buttered Cream (#F7F3EA)
- * Theme B ("red-kraft"): Clube da Brasa & Kraft — Crimson Red (#CB2031) on Oat Kraft Cream (#F5EFE2)
+ * Locked Seu Mignon Visual Identity:
+ * Palette: Proposta 2 ("Clube da Brasa & Kraft" — Crimson Red #CB2031 on Oat Kraft Cream #F5EFE2)
+ * Typography: Proposta 1 ("The Original Mignon" — Oswald display + Plus Jakarta Sans body)
  */
 :root,
+[data-theme='red-kraft'],
 [data-theme='blue-bistro'] {
-  --color-bg-canvas: #f7f3ea;
-  --color-bg-surface: #fffdf9;
-  --color-bg-subtle: #efe9dc;
-  --color-border: #e2d9c8;
-  --color-text-primary: #1c1917;
-  --color-text-secondary: #57534e;
-  --color-brand-primary: #10388b;
-  --color-brand-primary-hover: #0c2b6b;
-  --color-brand-secondary: #cb2031;
-  --color-status-success: #1f7a4c;
-  --color-status-error: #b91c1c;
-  --font-display: 'Oswald', sans-serif;
-  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-}
-
-[data-theme='red-kraft'] {
   --color-bg-canvas: #f5efe2;
   --color-bg-surface: #faf7f0;
   --color-bg-subtle: #ebe2d0;
@@ -36,8 +21,8 @@
   --color-brand-secondary: #10388b;
   --color-status-success: #2e6f40;
   --color-status-error: #991b1b;
-  --font-display: 'Fraunces', Georgia, serif;
-  --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-display: 'Oswald', sans-serif;
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
 }
 
 body {
@@ -47,4 +32,13 @@ body {
   transition:
     background-color 180ms ease,
     color 180ms ease;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }

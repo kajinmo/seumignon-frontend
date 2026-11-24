@@ -12,7 +12,7 @@ interface BoizinhoMascotProps {
 }
 
 export function BoizinhoMascot({
-  theme = 'blue-bistro',
+  theme = 'red-kraft',
   variant = 'stamp',
   className = 'h-12 w-12',
 }: BoizinhoMascotProps) {
