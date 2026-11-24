@@ -99,7 +99,23 @@ Returns active menu items (with `choice_groups`) and pre-calculated `delivery_zo
 }
 ```
 
-### 3.3. `POST /orders` (Request `201 Created`)
+### 3.3. `GET /delivery-fee?cep={cep}`
+
+Calculates authoritative delivery distance and fee within the 5.5 km cutoff:
+
+```json
+{
+  "cep": "03195000",
+  "distance_km": 0.0,
+  "fee_cents": 500,
+  "district": "Alto da Mooca",
+  "source": "local_index"
+}
+```
+
+Returns `422 Unprocessable Content` (`DeliveryOutOfRangeError`, `CepNotFoundError`, `InvalidCepError`) when invalid or outside the 5.5 km delivery radius.
+
+### 3.4. `POST /orders` (Request `201 Created` — Guest or Authenticated `Bearer <access_token>`)
 
 ```json
 {
@@ -111,12 +127,12 @@ Returns active menu items (with `choice_groups`) and pre-calculated `delivery_zo
     "customer_id": ""
   },
   "delivery_address": {
-    "zone_id": "zone_jardins",
-    "street_name": "Rua Augusta",
-    "street_number": "1500",
+    "postal_code": "03195-000",
+    "street_name": "Rua Exemplo",
+    "street_number": "123",
+    "district": "Alto da Mooca",
     "city": "São Paulo",
     "state": "SP",
-    "postal_code": "01304001",
     "complement": "Apto 42",
     "reference": "Próximo ao metrô",
     "country": "BR"
@@ -140,7 +156,7 @@ Returns active menu items (with `choice_groups`) and pre-calculated `delivery_zo
 }
 ```
 
-### 3.4. `OrderResponse` (Returned by `POST /orders` and `GET /orders/{order_id}`)
+### 3.5. `OrderResponse` (Returned by `POST /orders`, `GET /orders/{order_id}`, and `GET /me/orders`)
 
 Possible `status` values: `"PENDING"` | `"PAID"` | `"DISPATCHED"` | `"CANCELLED"`.
 
@@ -182,7 +198,14 @@ Possible `status` values: `"PENDING"` | `"PAID"` | `"DISPATCHED"` | `"CANCELLED"
 }
 ```
 
-### 3.5. Standard HTTP Error Envelope
+### 3.6. Passwordless Email OTP & Customer Routes (`Authorization: Bearer <access_token>`)
+
+- `POST /auth/request-code` (`{ "email": "..." }`) -> `{ "email", "challenge_name": "EMAIL_OTP", "session" }`
+- `POST /auth/verify-code` (`{ "email", "code", "session" }`) -> `{ "user_id", "email", "access_token", "id_token", "refresh_token", "expires_in_seconds" }`
+- `GET /me/profile` / `PUT /me/profile` -> saved customer details and `default_address`
+- `GET /me/orders` -> `OrderResponse[]`
+
+### 3.7. Standard HTTP Error Envelope
 
 Domain/business errors (`404`, `422`, `502`) return:
 
@@ -203,11 +226,12 @@ Domain/business errors (`404`, `422`, `502`) return:
    - `extra_sides`: typically `min_choices: 0`, `max_choices: 10`, `price_cents > 0`.
    - Validate `min_choices <= sum(quantities) <= max_choices` per group before enabling "Adicionar à sacola".
    - Exact line total formula: `(item.price_cents + sum(choice.price_cents * choice.quantity)) * item.quantity`.
-3. **Neighborhood Delivery Fee (`delivery_zones`):**
-   - Pre-calculated tiers within 5.5 km (`<= 1.5 km`: `500`, `<= 3.5 km`: `800`, `<= 5.5 km`: `900`), zero Google Maps cost.
-   - Checkout renders a searchable neighborhood selector backed by `delivery_zones` and submits `zone_id` to `POST /orders`.
-4. **Pagar.me Hosted Checkout (`checkout_url`) & Order Tracking:**
+3. **Authoritative CEP Delivery Fee (`GET /delivery-fee?cep=...`):**
+   - Customers enter their 8-digit CEP; `seumignon-backend` returns the authoritative `fee_cents`, `distance_km`, and `district` within the 5.5 km cutoff (returning `422` if out of range or invalid), with optional best-effort ViaCEP street autofill and zero Google Maps cost.
+   - Checkout submits `postal_code` and `district` in `POST /orders`.
+4. **Pagar.me Hosted Checkout (`checkout_url`), Optional Email OTP Account & Order Tracking:**
    - Zero card data collected in the SPA.
+   - Guest Checkout remains the default; optional Passwordless Email OTP (`access_token`) unlocks saved profile/address autofill and cloud order history (`GET /me/orders`).
    - Save created `order_id` in `localStorage`, navigate/redirect to `checkout_url`, and provide `/orders/:orderId` polling `GET /orders/{order_id}`.
 
 ---

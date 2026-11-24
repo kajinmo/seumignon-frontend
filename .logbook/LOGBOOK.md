@@ -13,6 +13,9 @@ Chronological record of UI/UX design decisions, epic execution milestones, and C
 | **E2** | **Catalog & Dish Customization Modal** | **COMPLETED** | Mobile-first menu header, smart `WelcomePromoModal`, `BoizinhoMascot` SVG, sticky category tabs, dish cards, and Sweetgreen/Foodpanda-inspired meal customization modal enforcing `choice_groups` (`included_sides` 3/3 in a 3x4 visual photo grid with repeat counters) and live centavos line totals |
 | **E3** | **Cart Drawer, Neighborhood Delivery Fee & Checkout** | **COMPLETED** | Persistent cart drawer/sidebar (`localStorage`), searchable `delivery_zones` selector (`R$ 5,00` / `R$ 8,00` / `R$ 9,00` tiers), customer & address form validation, `POST /orders` submission, and Pagar.me `checkout_url` handoff |
 | **E4** | **Order Status Page & Cloudflare Pages Deploy** | **COMPLETED** | `/orders/:orderId` live polling view (`PENDING` -> `PAID` -> `DISPATCHED` \| `CANCELLED`), Cloudflare Pages staging deploy config (`public/_redirects`, `seumignon-frontend.pages.dev`), mobile smoke test, and production DNS cutover runbook |
+| **E5** | **Smart CEP Delivery Fee & Local UX Polish** | **COMPLETED** | Authoritative CEP lookup (`GET /delivery-fee?cep=...`) replacing manual fee/zone selection, friendly 422 out-of-range handling, best-effort ViaCEP street autofill, "Pedir novamente", and "Limpar meus dados" privacy action |
+| **E6** | **Optional Customer Cloud Account (Passwordless)** | **COMPLETED** | Optional 2-step Passwordless Email OTP (`POST /auth/request-code` -> `POST /auth/verify-code`), `AuthContext` (`access_token`), `/me/profile` autofill + persistence, `/me/orders` cloud history, and transparent 401 Guest fallback |
+| **E7** | **White-Label Template & Brand Config Extraction** | **PLANNED** | Centralize brand identity (`src/config/brand.ts` / `VITE_*` env vars, logos, copy, default theme) for zero-overengineering isolated cloning (sibling restaurant & freelance projects) |
 
 ---
 
@@ -56,6 +59,21 @@ Chronological record of UI/UX design decisions, epic execution milestones, and C
 - [x] Build `/orders/:orderId` (`OrderStatusPage.tsx` + `src/domain/orderStatus.ts`) polling `GET /orders/{order_id}` with clear `PENDING` / `PAID` / `DISPATCHED` / `CANCELLED` feedback, Touchpoint #4 of `BoizinhoMascot`, and payment link recovery CTA.
 - [x] Configure Cloudflare Pages SPA routing (`public/_redirects` -> `/* /index.html 200`) and deployment checklist (`https://seumignon-frontend.pages.dev`) with `VITE_API_BASE_URL` pointing to AWS API Gateway.
 - [x] Document legacy KingHost `A` record IP rollback procedure, custom domain binding (`seumignon.com.br` & `www.seumignon.com.br`), SSL/CORS verification, and live mobile smoke test in `RUNBOOK.md`.
+
+### Epic E5: Smart CEP Delivery Fee & Local UX Polish (Completed)
+
+- [x] Replace manual neighborhood fee selection with authoritative CEP lookup (`GET /delivery-fee?cep=...` + best-effort ViaCEP street autofill) and `POST /orders` `district` + `postal_code` contract.
+- [x] Handle out-of-range (`422 DeliveryOutOfRangeError`), not-found (`CepNotFoundError`), and invalid (`InvalidCepError`) CEPs with clear pt-BR feedback.
+- [x] Add "Pedir novamente" shortcut from orders and "Limpar meus dados" privacy button for shared devices.
+
+### Epic E6: Optional Customer Cloud Account — Passwordless (Completed)
+
+- [x] Add optional 2-step Passwordless Email OTP (`POST /auth/request-code` -> `POST /auth/verify-code`) without blocking Guest Checkout, keeping OTP challenge `session` strictly in memory.
+- [x] Build `AuthContext` & `AccountModal` ("Meus Pedidos" via `GET /me/orders` and "Meu Perfil & Endereço" via `GET/PUT /me/profile`) using `Authorization: Bearer <access_token>` and automatic `401` session cleanup with Guest fallback.
+
+### Epic E7: White-Label Template & Brand Config Extraction (Planned)
+
+- [ ] Extract all restaurant-specific identity (brand name, logo assets, WhatsApp/social links, welcome modal copy, default theme) into `src/config/brand.ts` / `VITE_*` variables for isolated sibling restaurant and freelance deployments.
 
 ---
 
