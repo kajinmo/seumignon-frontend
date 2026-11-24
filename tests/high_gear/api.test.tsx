@@ -249,11 +249,24 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
       const authHeader = new Headers(init?.headers).get('Authorization');
 
       if (url.endsWith('/auth/request-code') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          email: string;
+          create_if_missing?: boolean;
+        };
+        if (body.email === 'naoexiste@exemplo.com' && body.create_if_missing === false) {
+          return new Response(
+            JSON.stringify({
+              error: 'UserNotFoundError',
+              detail: 'Customer email is not registered yet.',
+            }),
+            { status: 404 },
+          );
+        }
         return new Response(
           JSON.stringify({
-            email: 'cliente@exemplo.com',
+            email: body.email,
             challenge_name: 'EMAIL_OTP',
-            session: 'sess_abc',
+            session: body.create_if_missing ? 'sess_signup' : 'sess_abc',
           }),
           { status: 200 },
         );
@@ -296,6 +309,21 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
     const challenge = await client.requestAuthCode('cliente@exemplo.com');
     expect(challenge.session).toBe('sess_abc');
 
+    await expect(
+      client.requestAuthCode('naoexiste@exemplo.com', { createIfMissing: false }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<ApiClientError>>({
+        name: 'ApiClientError',
+        status: 404,
+        errorCode: 'UserNotFoundError',
+      }),
+    );
+
+    const signupChallenge = await client.requestAuthCode('naoexiste@exemplo.com', {
+      createIfMissing: true,
+    });
+    expect(signupChallenge.session).toBe('sess_signup');
+
     const tokens = await client.verifyAuthCode({
       email: 'cliente@exemplo.com',
       code: '12345678',
@@ -319,7 +347,7 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
     expect(myOrders).toEqual([]);
   });
 
-  it('renders App shell and switches live between Theme A (Azul #10388B) and Theme B (Vermelho #CB2031)', async () => {
+  it('renders App shell locked to Red Kraft theme without header theme switcher and displays curated category shortcuts', async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
@@ -337,12 +365,24 @@ describe('high_gear: SeuMignonApiClient HTTP contracts & Dual-Theme A/B App shel
       expect(screen.getByText('Parmegiana de Mignon')).toBeInTheDocument();
     });
 
-    expect(document.documentElement.getAttribute('data-theme')).toBe('blue-bistro');
-
-    const redThemeBtn = screen.getByRole('button', { name: /Proposta 2: Vermelho/i });
-    await user.click(redThemeBtn);
-
     expect(document.documentElement.getAttribute('data-theme')).toBe('red-kraft');
+    expect(
+      screen.queryByRole('group', { name: /Seletor de Tema Visual/i }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText('R$ 68,90')).toBeInTheDocument();
+
+    const nav = screen.getByRole('navigation', { name: /Categorias do Cardápio/i });
+    expect(nav).toHaveTextContent('Os mais pedidos');
+    expect(nav).toHaveTextContent('Grelhados');
+    expect(nav).toHaveTextContent('Clássicos da Cozinha');
+    expect(nav).toHaveTextContent('Acompanhamentos');
+    expect(nav).toHaveTextContent('Sobremesa');
+    expect(nav).toHaveTextContent('Bebidas');
+
+    await user.click(screen.getByRole('button', { name: /Sobremesa/i }));
+    expect(screen.getByText(/Ainda não há itens cadastrados em Sobremesa/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Ver cardápio completo/i }));
+    expect(screen.getByText('Parmegiana de Mignon')).toBeInTheDocument();
   });
 });

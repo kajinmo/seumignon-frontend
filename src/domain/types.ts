@@ -162,6 +162,7 @@ export interface OrderResponse {
 
 export interface AuthRequestCodeRequest {
   email: string;
+  create_if_missing?: boolean;
 }
 
 export interface AuthRequestCodeResponse {

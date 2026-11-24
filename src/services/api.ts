@@ -129,12 +129,15 @@ export class SeuMignonApiClient {
 
   public async requestAuthCode(
     email: string,
-    signal?: AbortSignal,
+    options?: { createIfMissing?: boolean; signal?: AbortSignal },
   ): Promise<AuthRequestCodeResponse> {
     return this.request<AuthRequestCodeResponse>('/auth/request-code', {
       method: 'POST',
-      body: JSON.stringify({ email: email.trim().toLowerCase() }),
-      signal,
+      body: JSON.stringify({
+        email: email.trim().toLowerCase(),
+        create_if_missing: options?.createIfMissing ?? false,
+      }),
+      signal: options?.signal,
     });
   }
 

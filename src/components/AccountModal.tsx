@@ -2,8 +2,11 @@
  * Optional Customer Account Modal (`AccountModal.tsx`).
  *
  * Features:
- * 1. Passwordless 2-step Email OTP login (`POST /auth/request-code` -> `POST /auth/verify-code`),
- *    keeping the OTP `session` strictly in memory while active.
+ * 1. Clear separation for unauthenticated customers:
+ *    - "Já tenho conta": Passwordless Email OTP (`POST /auth/request-code` -> `POST /auth/verify-code`),
+ *      automatically prompting new-to-profile users (`GET /me/profile` 404) to complete their profile.
+ *    - "Criar minha conta": Upfront registration form (name, phone, email, CPF, default address)
+ *      followed by Email OTP verification that immediately persists `PUT /me/profile`.
  * 2. Cloud Order History (`GET /me/orders`) with live tracking, Pagar.me link recovery, and "Pedir novamente".
  * 3. Saved Profile & Default Address (`GET /me/profile` + `PUT /me/profile`) to autofill checkouts.
  * 4. Automatic graceful cleanup when any authenticated call returns `401 Unauthorized`.
@@ -21,18 +24,22 @@ import {
   Mail,
   RotateCcw,
   User,
+  UserPlus,
   X,
 } from 'lucide-react';
 import {
   formatCepInput,
   formatCentsToBRL,
   getOrderStatusPresentation,
+  isCompleteCep,
   stripNonDigits,
   type AuthRequestCodeResponse,
   type OrderResponse,
+  type UpsertCustomerProfileRequest,
 } from '../domain';
 import { useAuth } from '../contexts/AuthContext';
-import { ApiClientError, apiClient } from '../services/api';
+import { useCart } from '../contexts/CartContext';
+import { ApiClientError, apiClient, lookupCepAddressPublic } from '../services/api';
 
 interface AccountModalProps {
   isOpen: boolean;
@@ -41,11 +48,13 @@ interface AccountModalProps {
   onReorder?: (order: OrderResponse) => void;
 }
 
+type UnauthMode = 'login' | 'register';
 type AccountTab = 'orders' | 'profile';
 
 interface ProfileFormState {
   name: string;
   phone: string;
+  email: string;
   documentNumber: string;
   postalCode: string;
   streetName: string;
@@ -58,6 +67,7 @@ interface ProfileFormState {
 const EMPTY_PROFILE_FORM: ProfileFormState = {
   name: '',
   phone: '',
+  email: '',
   documentNumber: '',
   postalCode: '',
   streetName: '',
@@ -67,11 +77,42 @@ const EMPTY_PROFILE_FORM: ProfileFormState = {
   reference: '',
 };
 
+function validateUpfrontRegistration(form: ProfileFormState): string | null {
+  if (form.name.trim().length < 3) {
+    return 'Informe seu nome completo.';
+  }
+  const phoneDigits = stripNonDigits(form.phone);
+  if (phoneDigits.length < 10 || phoneDigits.length > 11) {
+    return 'Informe um WhatsApp/telefone válido com DDD (10 ou 11 dígitos).';
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
+    return 'Informe um e-mail válido para receber o código de confirmação.';
+  }
+  const docDigits = stripNonDigits(form.documentNumber);
+  if (docDigits.length !== 11 && docDigits.length !== 14) {
+    return 'Informe um CPF válido (11 dígitos).';
+  }
+  if (!isCompleteCep(form.postalCode)) {
+    return 'Informe um CEP válido com 8 dígitos.';
+  }
+  if (form.streetName.trim().length < 2) {
+    return 'Informe o nome da rua ou avenida.';
+  }
+  if (form.streetNumber.trim().length < 1) {
+    return 'Informe o número do endereço.';
+  }
+  if (form.district.trim().length < 2) {
+    return 'Informe o bairro do endereço.';
+  }
+  return null;
+}
+
 export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: AccountModalProps) {
   const {
     session,
     isAuthenticated,
     profile,
+    isNewUserWithoutProfile,
     authNotice,
     clearAuthNotice,
     requestOtpCode,
@@ -81,10 +122,17 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
     logout,
   } = useAuth();
 
-  // Unauthenticated OTP state (challenge session kept strictly in memory)
+  const { checkoutDraft } = useCart();
+
+  // Unauthenticated state (challenge session & pending registration stay strictly in memory)
+  const [unauthMode, setUnauthMode] = useState<UnauthMode>('login');
   const [emailInput, setEmailInput] = useState<string>('');
+  const [registerForm, setRegisterForm] = useState<ProfileFormState>(EMPTY_PROFILE_FORM);
+  const [pendingRegistrationPayload, setPendingRegistrationPayload] =
+    useState<UpsertCustomerProfileRequest | null>(null);
   const [otpChallenge, setOtpChallenge] = useState<AuthRequestCodeResponse | null>(null);
   const [otpCodeInput, setOtpCodeInput] = useState<string>('');
+  const [registrationPromptNotice, setRegistrationPromptNotice] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(false);
 
@@ -102,6 +150,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
   useEffect(() => {
     if (!isOpen) {
       setAuthError(null);
+      setRegistrationPromptNotice(null);
       setProfileSuccess(null);
       setProfileError(null);
       setOrdersError(null);
@@ -119,15 +168,34 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  // If user logged in via "Já tenho conta" and backend returned 404 for /me/profile, guide them straight to Profile
+  useEffect(() => {
+    if (isAuthenticated && isNewUserWithoutProfile && !pendingRegistrationPayload) {
+      setActiveTab('profile');
+    }
+  }, [isAuthenticated, isNewUserWithoutProfile, pendingRegistrationPayload]);
+
   useEffect(() => {
     if (!profile) {
-      setProfileForm(EMPTY_PROFILE_FORM);
+      setProfileForm({
+        name: checkoutDraft.name,
+        phone: checkoutDraft.phone,
+        email: session?.email ?? checkoutDraft.email,
+        documentNumber: checkoutDraft.documentNumber,
+        postalCode: checkoutDraft.postalCode,
+        streetName: checkoutDraft.streetName,
+        streetNumber: checkoutDraft.streetNumber,
+        district: checkoutDraft.district,
+        complement: checkoutDraft.complement,
+        reference: checkoutDraft.reference,
+      });
       return;
     }
     const addr = profile.default_address;
     setProfileForm({
       name: profile.name ?? '',
       phone: profile.phone ?? '',
+      email: profile.email ?? session?.email ?? '',
       documentNumber: profile.document_number ?? '',
       postalCode: addr?.postal_code ? formatCepInput(addr.postal_code) : '',
       streetName: addr?.street_name ?? '',
@@ -136,7 +204,7 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
       complement: addr?.complement ?? '',
       reference: addr?.reference ?? '',
     });
-  }, [profile]);
+  }, [profile, session?.email, checkoutDraft]);
 
   const fetchMyOrders = useCallback(
     async (accessToken: string, signal?: AbortSignal) => {
@@ -180,9 +248,44 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
     return null;
   }
 
-  async function handleRequestOtp(event: FormEvent<HTMLFormElement>) {
+  function handleSwitchUnauthMode(mode: UnauthMode) {
+    setUnauthMode(mode);
+    setOtpChallenge(null);
+    setPendingRegistrationPayload(null);
+    setOtpCodeInput('');
+    setAuthError(null);
+    setRegistrationPromptNotice(null);
+    if (mode === 'register' && emailInput.trim() && !registerForm.email.trim()) {
+      setRegisterForm((prev) => ({ ...prev, email: emailInput.trim() }));
+    }
+  }
+
+  function handleRegisterCepChange(rawCep: string) {
+    const formatted = formatCepInput(rawCep);
+    setRegisterForm((prev) => ({ ...prev, postalCode: formatted }));
+
+    const digits = stripNonDigits(formatted);
+    if (digits.length === 8) {
+      void lookupCepAddressPublic(digits).then((publicAddr) => {
+        if (!publicAddr) return;
+        setRegisterForm((prev) => {
+          if (stripNonDigits(prev.postalCode) !== digits) {
+            return prev;
+          }
+          return {
+            ...prev,
+            streetName: prev.streetName.trim() ? prev.streetName : (publicAddr.streetName ?? ''),
+            district: prev.district.trim() ? prev.district : (publicAddr.district ?? ''),
+          };
+        });
+      });
+    }
+  }
+
+  async function handleRequestLoginOtp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthError(null);
+    setRegistrationPromptNotice(null);
     clearAuthNotice();
 
     const normalized = emailInput.trim().toLowerCase();
@@ -193,14 +296,75 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
 
     setIsAuthLoading(true);
     try {
-      const challenge = await requestOtpCode(normalized);
+      const challenge = await requestOtpCode(normalized, { createIfMissing: false });
+      setPendingRegistrationPayload(null);
+      setOtpChallenge(challenge);
+      setOtpCodeInput('');
+    } catch (err) {
+      if (
+        err instanceof ApiClientError &&
+        (err.status === 404 ||
+          err.errorCode === 'UserNotFoundError' ||
+          err.errorCode === 'ProfileNotFoundError')
+      ) {
+        setUnauthMode('register');
+        setRegisterForm((prev) => ({ ...prev, email: normalized }));
+        setRegistrationPromptNotice(
+          `O e-mail ${normalized} ainda não possui cadastro. Preencha seus dados abaixo para criar sua conta e receber o código de confirmação!`,
+        );
+        setAuthError(null);
+      } else if (err instanceof ApiClientError) {
+        setAuthError(err.detail);
+      } else {
+        setAuthError('Não foi possível enviar o código agora. Tente novamente.');
+      }
+    } finally {
+      setIsAuthLoading(false);
+    }
+  }
+
+  async function handleStartRegistration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthError(null);
+    clearAuthNotice();
+
+    const validationError = validateUpfrontRegistration(registerForm);
+    if (validationError) {
+      setAuthError(validationError);
+      return;
+    }
+
+    const normalizedEmail = registerForm.email.trim().toLowerCase();
+    const registrationPayload: UpsertCustomerProfileRequest = {
+      email: normalizedEmail,
+      name: registerForm.name.trim(),
+      phone: stripNonDigits(registerForm.phone),
+      document_number: stripNonDigits(registerForm.documentNumber),
+      default_address: {
+        postal_code: formatCepInput(registerForm.postalCode),
+        street_name: registerForm.streetName.trim(),
+        street_number: registerForm.streetNumber.trim(),
+        district: registerForm.district.trim(),
+        city: 'São Paulo',
+        state: 'SP',
+        complement: registerForm.complement.trim(),
+        reference: registerForm.reference.trim(),
+        country: 'BR',
+      },
+    };
+
+    setIsAuthLoading(true);
+    try {
+      const challenge = await requestOtpCode(normalizedEmail, { createIfMissing: true });
+      setRegistrationPromptNotice(null);
+      setPendingRegistrationPayload(registrationPayload);
       setOtpChallenge(challenge);
       setOtpCodeInput('');
     } catch (err) {
       if (err instanceof ApiClientError) {
         setAuthError(err.detail);
       } else {
-        setAuthError('Não foi possível enviar o código agora. Tente novamente.');
+        setAuthError('Não foi possível enviar o código de confirmação agora. Tente novamente.');
       }
     } finally {
       setIsAuthLoading(false);
@@ -220,11 +384,32 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
 
     setIsAuthLoading(true);
     try {
-      await verifyOtpCode({
+      const isSignUpFlow = Boolean(pendingRegistrationPayload);
+      const authResult = await verifyOtpCode({
         email: otpChallenge.email,
         code: trimmedCode,
         challengeSession: otpChallenge.session,
+        skipProfileAutoFetch: isSignUpFlow,
       });
+
+      if (pendingRegistrationPayload) {
+        try {
+          await saveProfile(pendingRegistrationPayload, authResult.access_token);
+          setActiveTab('profile');
+          setProfileSuccess(
+            'Cadastro concluído! Seus dados e endereço padrão já estão salvos para os próximos pedidos.',
+          );
+        } catch {
+          setActiveTab('profile');
+          setProfileError(
+            'Sua conta foi validada, mas não foi possível salvar seus dados agora. Tente salvar novamente abaixo.',
+          );
+        }
+        setPendingRegistrationPayload(null);
+      } else {
+        setActiveTab('orders');
+      }
+
       setOtpChallenge(null);
       setOtpCodeInput('');
     } catch (err) {
@@ -302,7 +487,11 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
               id="account-modal-title"
               className="font-display text-2xl font-bold uppercase tracking-tight text-ink-primary"
             >
-              {isAuthenticated ? 'Minha Conta' : 'Entrar por E-mail'}
+              {isAuthenticated
+                ? 'Minha Conta'
+                : unauthMode === 'register'
+                  ? 'Criar Minha Conta'
+                  : 'Entrar ou Cadastrar'}
             </h2>
           </div>
 
@@ -328,13 +517,63 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
           )}
 
           {!isAuthenticated ? (
-            /* Unauthenticated 2-step Passwordless Email OTP */
+            /* Unauthenticated View: "Já tenho conta" vs "Criar minha conta" */
             <div className="space-y-4">
-              <p className="rounded-xl border border-border bg-subtle/60 p-3 text-xs leading-relaxed text-ink-secondary">
-                O login é <strong>100% opcional</strong>: você sempre pode pedir normalmente como
-                convidado. Entrando com seu e-mail, seu endereço padrão e histórico de pedidos ficam
-                salvos na nuvem.
-              </p>
+              {!otpChallenge && (
+                <>
+                  <div
+                    role="tablist"
+                    aria-label="Modo de acesso"
+                    className="grid grid-cols-2 gap-2 rounded-xl bg-subtle p-1"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={unauthMode === 'login'}
+                      onClick={() => handleSwitchUnauthMode('login')}
+                      className={`flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-bold transition ${
+                        unauthMode === 'login'
+                          ? 'bg-brand-primary text-white shadow-2xs'
+                          : 'text-ink-secondary hover:text-ink-primary'
+                      }`}
+                    >
+                      <Mail className="h-3.5 w-3.5" />
+                      <span>Já tenho conta</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={unauthMode === 'register'}
+                      onClick={() => handleSwitchUnauthMode('register')}
+                      className={`flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-bold transition ${
+                        unauthMode === 'register'
+                          ? 'bg-brand-primary text-white shadow-2xs'
+                          : 'text-ink-secondary hover:text-ink-primary'
+                      }`}
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                      <span>Criar minha conta</span>
+                    </button>
+                  </div>
+
+                  <p className="rounded-xl border border-border bg-subtle/60 p-3 text-xs leading-relaxed text-ink-secondary">
+                    O cadastro é <strong>100% opcional</strong>: você também pode pedir direto como
+                    convidado no checkout. Criando sua conta, seu endereço padrão e histórico ficam
+                    salvos na nuvem sem precisar decorar senha.
+                  </p>
+                </>
+              )}
+
+              {registrationPromptNotice && (
+                <div
+                  role="status"
+                  data-testid="unregistered-email-notice"
+                  className="flex items-start gap-2 rounded-xl border border-brand-primary/30 bg-brand-primary/10 p-3 text-xs font-medium text-ink-primary"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary" />
+                  <span>{registrationPromptNotice}</span>
+                </div>
+              )}
 
               {authError && (
                 <div
@@ -346,8 +585,86 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                 </div>
               )}
 
-              {!otpChallenge ? (
-                <form onSubmit={(e) => void handleRequestOtp(e)} noValidate className="space-y-4">
+              {otpChallenge ? (
+                /* Step 2 (shared OTP verification for Login or Sign-Up) */
+                <form onSubmit={(e) => void handleVerifyOtp(e)} noValidate className="space-y-4">
+                  <div className="rounded-xl border border-brand-primary/30 bg-brand-primary/5 p-3 text-xs text-ink-primary">
+                    Enviamos um código de verificação de{' '}
+                    <strong>Seu Mignon &lt;nao-responda@seumignon.com.br&gt;</strong> para{' '}
+                    <strong>{otpChallenge.email}</strong> (expira em cerca de 3 minutos).
+                    {pendingRegistrationPayload && (
+                      <span className="mt-1 block font-semibold text-brand-primary">
+                        Assim que confirmar o código, finalizaremos seu cadastro com os dados
+                        informados.
+                      </span>
+                    )}
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="auth-otp-input"
+                      className="block text-xs font-bold text-ink-primary"
+                    >
+                      Código recebido no e-mail *
+                    </label>
+                    <div className="relative mt-1">
+                      <KeyRound
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-secondary"
+                      />
+                      <input
+                        id="auth-otp-input"
+                        type="text"
+                        inputMode="numeric"
+                        value={otpCodeInput}
+                        onChange={(e) => setOtpCodeInput(e.target.value)}
+                        placeholder="Digite os dígitos do código"
+                        className="w-full rounded-xl border border-border bg-subtle/50 py-2.5 pl-9 pr-3 font-mono text-sm tracking-widest text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isAuthLoading}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-primary px-4 py-3 text-sm font-bold text-white shadow-md transition hover:bg-brand-hover disabled:opacity-60"
+                  >
+                    {isAuthLoading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Validando código...</span>
+                      </>
+                    ) : (
+                      <span>
+                        {pendingRegistrationPayload
+                          ? 'Confirmar código e concluir cadastro'
+                          : 'Validar e entrar'}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isAuthLoading}
+                    onClick={() => {
+                      setOtpChallenge(null);
+                      setOtpCodeInput('');
+                      setAuthError(null);
+                    }}
+                    className="w-full rounded-xl border border-border bg-subtle py-2.5 text-xs font-bold text-ink-secondary transition hover:text-ink-primary"
+                  >
+                    {pendingRegistrationPayload
+                      ? 'Voltar e editar dados / e-mail'
+                      : 'Trocar e-mail ou pedir novo código'}
+                  </button>
+                </form>
+              ) : unauthMode === 'login' ? (
+                /* Mode 1: Returning User Login by Email OTP */
+                <form
+                  onSubmit={(e) => void handleRequestLoginOtp(e)}
+                  noValidate
+                  className="space-y-4"
+                >
                   <div>
                     <label
                       htmlFor="auth-email-input"
@@ -388,35 +705,214 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                       </>
                     )}
                   </button>
+
+                  <p className="text-center text-xs text-ink-secondary">
+                    Ainda não tem cadastro?{' '}
+                    <button
+                      type="button"
+                      onClick={() => handleSwitchUnauthMode('register')}
+                      className="font-bold text-brand-primary underline"
+                    >
+                      Preencher meus dados agora
+                    </button>
+                  </p>
                 </form>
               ) : (
-                <form onSubmit={(e) => void handleVerifyOtp(e)} noValidate className="space-y-4">
-                  <div className="rounded-xl border border-brand-primary/30 bg-brand-primary/5 p-3 text-xs text-ink-primary">
-                    Enviamos um código de verificação de{' '}
-                    <strong>Seu Mignon &lt;nao-responda@seumignon.com.br&gt;</strong> para{' '}
-                    <strong>{otpChallenge.email}</strong> (expira em cerca de 3 minutos).
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor="auth-otp-input"
-                      className="block text-xs font-bold text-ink-primary"
-                    >
-                      Código recebido no e-mail *
-                    </label>
-                    <div className="relative mt-1">
-                      <KeyRound
-                        aria-hidden="true"
-                        className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-secondary"
-                      />
+                /* Mode 2: Upfront Registration Form -> Email OTP Confirmation */
+                <form
+                  onSubmit={(e) => void handleStartRegistration(e)}
+                  noValidate
+                  className="space-y-4"
+                >
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label
+                        htmlFor="register-name"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Nome completo *
+                      </label>
                       <input
-                        id="auth-otp-input"
+                        id="register-name"
+                        type="text"
+                        value={registerForm.name}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, name: e.target.value }))
+                        }
+                        placeholder="Ex.: Maria Silva"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-phone"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        WhatsApp / Telefone com DDD *
+                      </label>
+                      <input
+                        id="register-phone"
+                        type="tel"
+                        value={registerForm.phone}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, phone: e.target.value }))
+                        }
+                        placeholder="Ex.: (11) 99999-8888"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-email"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        E-mail *
+                      </label>
+                      <input
+                        id="register-email"
+                        type="email"
+                        value={registerForm.email}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, email: e.target.value }))
+                        }
+                        placeholder="Ex.: maria@exemplo.com"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-document"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        CPF *
+                      </label>
+                      <input
+                        id="register-document"
                         type="text"
                         inputMode="numeric"
-                        value={otpCodeInput}
-                        onChange={(e) => setOtpCodeInput(e.target.value)}
-                        placeholder="Digite os dígitos do código"
-                        className="w-full rounded-xl border border-border bg-subtle/50 py-2.5 pl-9 pr-3 font-mono text-sm tracking-widest text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                        value={registerForm.documentNumber}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, documentNumber: e.target.value }))
+                        }
+                        placeholder="Ex.: 123.456.789-09"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-cep"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        CEP *
+                      </label>
+                      <input
+                        id="register-cep"
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={9}
+                        value={registerForm.postalCode}
+                        onChange={(e) => handleRegisterCepChange(e.target.value)}
+                        placeholder="Ex.: 03195-000"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-district"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Bairro *
+                      </label>
+                      <input
+                        id="register-district"
+                        type="text"
+                        value={registerForm.district}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, district: e.target.value }))
+                        }
+                        placeholder="Ex.: Alto da Mooca"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label
+                        htmlFor="register-street"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Rua / Avenida *
+                      </label>
+                      <input
+                        id="register-street"
+                        type="text"
+                        value={registerForm.streetName}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, streetName: e.target.value }))
+                        }
+                        placeholder="Ex.: Rua dos Trilhos"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-number"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Número *
+                      </label>
+                      <input
+                        id="register-number"
+                        type="text"
+                        value={registerForm.streetNumber}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, streetNumber: e.target.value }))
+                        }
+                        placeholder="Ex.: 123"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="register-complement"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Complemento
+                      </label>
+                      <input
+                        id="register-complement"
+                        type="text"
+                        value={registerForm.complement}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, complement: e.target.value }))
+                        }
+                        placeholder="Ex.: Apto 42"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label
+                        htmlFor="register-reference"
+                        className="block text-xs font-bold text-ink-primary"
+                      >
+                        Ponto de referência
+                      </label>
+                      <input
+                        id="register-reference"
+                        type="text"
+                        value={registerForm.reference}
+                        onChange={(e) =>
+                          setRegisterForm((prev) => ({ ...prev, reference: e.target.value }))
+                        }
+                        placeholder="Ex.: Próximo ao metrô"
+                        className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                       />
                     </div>
                   </div>
@@ -429,24 +925,14 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                     {isAuthLoading ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>Validando código...</span>
+                        <span>Enviando código de confirmação...</span>
                       </>
                     ) : (
-                      <span>Validar e entrar</span>
+                      <>
+                        <UserPlus className="h-4 w-4" />
+                        <span>Continuar e validar e-mail com código</span>
+                      </>
                     )}
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isAuthLoading}
-                    onClick={() => {
-                      setOtpChallenge(null);
-                      setOtpCodeInput('');
-                      setAuthError(null);
-                    }}
-                    className="w-full rounded-xl border border-border bg-subtle py-2.5 text-xs font-bold text-ink-secondary transition hover:text-ink-primary"
-                  >
-                    Trocar e-mail ou pedir novo código
                   </button>
                 </form>
               )}
@@ -608,6 +1094,19 @@ export function AccountModal({ isOpen, onClose, onTrackOrder, onReorder }: Accou
                 </div>
               ) : (
                 <form onSubmit={(e) => void handleSaveProfile(e)} noValidate className="space-y-4">
+                  {isNewUserWithoutProfile && !profileSuccess && (
+                    <div
+                      role="status"
+                      className="flex items-start gap-2 rounded-xl border border-brand-primary/30 bg-brand-primary/10 p-3 text-xs font-medium text-ink-primary"
+                    >
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary" />
+                      <span>
+                        Bem-vindo! Como este é seu primeiro acesso, complete seus dados abaixo para
+                        agilizar seus próximos pedidos.
+                      </span>
+                    </div>
+                  )}
+
                   {profileSuccess && (
                     <div className="flex items-start gap-2 rounded-xl border border-status-success/30 bg-status-success/10 p-3 text-xs font-semibold text-status-success">
                       <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />

@@ -13,8 +13,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { HelpCircle, Palette, ShoppingBag, User } from 'lucide-react';
 import {
   WELCOME_PROMO_CONFIG,
+  buildCategoryShortcuts,
+  filterAndGroupMenuByShortcut,
   formatCentsToBRL,
+  getCategoryShortcutLabel,
   normalizeSearchText,
+  type CategoryShortcutId,
   type HealthResponse,
   type MenuItem,
   type MenuResponse,
@@ -39,13 +43,7 @@ const THEME_STORAGE_KEY = 'seumignon:theme';
 const WELCOME_SEEN_KEY_PREFIX = 'seumignon:welcome-seen:';
 
 function getInitialTheme(): ThemeId {
-  if (typeof window !== 'undefined') {
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === 'blue-bistro' || stored === 'red-kraft') {
-      return stored;
-    }
-  }
-  return 'blue-bistro';
+  return 'red-kraft';
 }
 
 function getInitialWelcomeOpen(): boolean {
@@ -96,8 +94,7 @@ function StorefrontContent({
   const [isWelcomeOpen, setIsWelcomeOpen] = useState<boolean>(getInitialWelcomeOpen);
   const [isBrandShowcaseOpen, setIsBrandShowcaseOpen] = useState<boolean>(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
-  const [activeCategory, setActiveCategory] = useState<string>('ALL');
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [activeShortcut, setActiveShortcut] = useState<CategoryShortcutId>('ALL');
   const [selectedDishForModal, setSelectedDishForModal] = useState<MenuItem | null>(null);
   const [isMobileCartDrawerOpen, setIsMobileCartDrawerOpen] = useState<boolean>(false);
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState<boolean>(false);
@@ -198,43 +195,19 @@ function StorefrontContent({
     return [...baseItems, ...standaloneExtras];
   }, [menu]);
 
-  const categories = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const item of enrichedMenuItems) {
-      const cat = item.category || 'Cardápio';
-      counts.set(cat, (counts.get(cat) ?? 0) + 1);
-    }
-    return Array.from(counts.entries()).map(([name, count]) => ({ name, count }));
-  }, [enrichedMenuItems]);
+  const categoryShortcuts = useMemo(
+    () => buildCategoryShortcuts(enrichedMenuItems),
+    [enrichedMenuItems],
+  );
 
-  const filteredSections = useMemo(() => {
-    const normalizedQuery = normalizeSearchText(searchQuery);
-    const matchingItems = enrichedMenuItems.filter((item) => {
-      const matchesCategory = activeCategory === 'ALL' || item.category === activeCategory;
-      const matchesQuery =
-        !normalizedQuery ||
-        normalizeSearchText(item.name).includes(normalizedQuery) ||
-        normalizeSearchText(item.description).includes(normalizedQuery);
-      return matchesCategory && matchesQuery;
-    });
-
-    const grouped = new Map<string, MenuItem[]>();
-    for (const item of matchingItems) {
-      const cat = item.category || 'Cardápio';
-      const existing = grouped.get(cat) ?? [];
-      existing.push(item);
-      grouped.set(cat, existing);
-    }
-
-    return Array.from(grouped.entries()).map(([categoryName, items]) => ({
-      categoryName,
-      items,
-    }));
-  }, [enrichedMenuItems, activeCategory, searchQuery]);
+  const filteredSections = useMemo(
+    () => filterAndGroupMenuByShortcut(enrichedMenuItems, activeShortcut, ''),
+    [enrichedMenuItems, activeShortcut],
+  );
 
   const accountButtonLabel = isAuthenticated
     ? profile?.name?.trim().split(' ')[0] || session?.email.split('@')[0] || 'Minha Conta'
-    : 'Entrar';
+    : 'Entrar / Cadastrar';
 
   return (
     <div className="min-h-screen bg-canvas pb-28 text-ink-primary lg:pb-12">
@@ -327,38 +300,6 @@ function StorefrontContent({
               <HelpCircle className="h-3.5 w-3.5" />
               <span>Como funciona</span>
             </button>
-
-            {/* Dual-Theme A/B Switcher */}
-            <div
-              role="group"
-              aria-label="Seletor de Tema Visual"
-              className="flex items-center gap-1 rounded-full border border-border bg-subtle p-1"
-            >
-              <button
-                type="button"
-                onClick={() => onSelectTheme('blue-bistro')}
-                aria-pressed={theme === 'blue-bistro'}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition sm:px-3 sm:text-xs ${
-                  theme === 'blue-bistro'
-                    ? 'bg-brand-primary text-white shadow-2xs'
-                    : 'text-ink-secondary hover:text-ink-primary'
-                }`}
-              >
-                Proposta 1: Azul (#10388B)
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectTheme('red-kraft')}
-                aria-pressed={theme === 'red-kraft'}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition sm:px-3 sm:text-xs ${
-                  theme === 'red-kraft'
-                    ? 'bg-brand-primary text-white shadow-2xs'
-                    : 'text-ink-secondary hover:text-ink-primary'
-                }`}
-              >
-                Proposta 2: Vermelho (#CB2031)
-              </button>
-            </div>
           </div>
         </div>
       </header>
@@ -378,13 +319,12 @@ function StorefrontContent({
       ) : (
         /* Route View 2: Main Menu Catalog + Sticky Cart Sidebar + Checkout */
         <>
-          {categories.length > 0 && (
+          {enrichedMenuItems.length > 0 && (
             <CategoryTabs
-              categories={categories}
-              activeCategory={activeCategory}
-              onSelectCategory={setActiveCategory}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
+              shortcuts={categoryShortcuts}
+              totalItemsCount={enrichedMenuItems.length}
+              activeShortcut={activeShortcut}
+              onSelectShortcut={setActiveShortcut}
             />
           )}
 
@@ -411,14 +351,12 @@ function StorefrontContent({
                   {filteredSections.length === 0 ? (
                     <div className="rounded-2xl border border-border bg-surface p-8 text-center">
                       <p className="text-sm font-semibold text-ink-primary">
-                        Nenhum prato encontrado para &ldquo;{searchQuery}&rdquo;.
+                        Ainda não há itens cadastrados em {getCategoryShortcutLabel(activeShortcut)}{' '}
+                        neste momento.
                       </p>
                       <button
                         type="button"
-                        onClick={() => {
-                          setSearchQuery('');
-                          setActiveCategory('ALL');
-                        }}
+                        onClick={() => setActiveShortcut('ALL')}
                         className="mt-3 rounded-full bg-brand-primary px-4 py-1.5 text-xs font-bold text-white"
                       >
                         Ver cardápio completo

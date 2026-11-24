@@ -41,16 +41,24 @@ export interface AuthContextValue {
   isAuthenticated: boolean;
   profile: CustomerProfileResponse | null;
   isLoadingProfile: boolean;
+  isNewUserWithoutProfile: boolean;
   authNotice: string | null;
   clearAuthNotice: () => void;
-  requestOtpCode: (email: string) => Promise<AuthRequestCodeResponse>;
+  requestOtpCode: (
+    email: string,
+    options?: { createIfMissing?: boolean },
+  ) => Promise<AuthRequestCodeResponse>;
   verifyOtpCode: (params: {
     email: string;
     code: string;
     challengeSession: string;
+    skipProfileAutoFetch?: boolean;
   }) => Promise<AuthVerifyCodeResponse>;
   refreshProfile: () => Promise<CustomerProfileResponse | null>;
-  saveProfile: (payload: UpsertCustomerProfileRequest) => Promise<CustomerProfileResponse>;
+  saveProfile: (
+    payload: UpsertCustomerProfileRequest,
+    overrideAccessToken?: string,
+  ) => Promise<CustomerProfileResponse>;
   handleUnauthorized: (customNotice?: string) => void;
   logout: () => void;
 }
@@ -95,8 +103,10 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
   const [session, setSession] = useState<AuthSession | null>(readStoredAuthSession);
   const [profile, setProfile] = useState<CustomerProfileResponse | null>(null);
   const [isLoadingProfile, setIsLoadingProfile] = useState<boolean>(false);
+  const [isNewUserWithoutProfile, setIsNewUserWithoutProfile] = useState<boolean>(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
 
+  const skipNextAutoFetchRef = useRef<boolean>(false);
   const onProfileLoadedRef = useRef(onProfileLoaded);
   useEffect(() => {
     onProfileLoadedRef.current = onProfileLoaded;
@@ -117,6 +127,7 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
   const handleUnauthorized = useCallback((customNotice?: string) => {
     setSession(null);
     setProfile(null);
+    setIsNewUserWithoutProfile(false);
     setAuthNotice(
       customNotice ??
         'Sua sessão expirou. Você pode continuar seu pedido como convidado ou entrar novamente com um código por e-mail.',
@@ -134,6 +145,7 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
         const loaded = await apiClient.getMyProfile(accessToken, signal);
         if (signal?.aborted) return null;
         setProfile(loaded);
+        setIsNewUserWithoutProfile(false);
         onProfileLoadedRef.current?.(loaded);
         return loaded;
       } catch (err) {
@@ -145,6 +157,7 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
           }
           if (err.status === 404) {
             setProfile(null);
+            setIsNewUserWithoutProfile(true);
             return null;
           }
         }
@@ -165,25 +178,44 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
       handleUnauthorized();
       return;
     }
+    if (skipNextAutoFetchRef.current) {
+      skipNextAutoFetchRef.current = false;
+      return;
+    }
 
     const controller = new AbortController();
     void loadProfileForToken(session.accessToken, controller.signal);
     return () => controller.abort();
   }, [session, handleUnauthorized, loadProfileForToken]);
 
-  const requestOtpCode = useCallback(async (email: string) => {
-    setAuthNotice(null);
-    return apiClient.requestAuthCode(email);
-  }, []);
+  const requestOtpCode = useCallback(
+    async (email: string, options?: { createIfMissing?: boolean }) => {
+      setAuthNotice(null);
+      return apiClient.requestAuthCode(email, {
+        createIfMissing: options?.createIfMissing ?? false,
+      });
+    },
+    [],
+  );
 
   const verifyOtpCode = useCallback(
-    async (params: { email: string; code: string; challengeSession: string }) => {
+    async (params: {
+      email: string;
+      code: string;
+      challengeSession: string;
+      skipProfileAutoFetch?: boolean;
+    }) => {
       setAuthNotice(null);
       const authResult = await apiClient.verifyAuthCode({
         email: params.email,
         code: params.code,
         session: params.challengeSession,
       });
+
+      if (params.skipProfileAutoFetch) {
+        skipNextAutoFetchRef.current = true;
+      }
+      setIsNewUserWithoutProfile(false);
 
       const nextSession: AuthSession = {
         userId: authResult.user_id,
@@ -205,8 +237,12 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
   }, [session, loadProfileForToken]);
 
   const saveProfile = useCallback(
-    async (payload: UpsertCustomerProfileRequest): Promise<CustomerProfileResponse> => {
-      if (!session) {
+    async (
+      payload: UpsertCustomerProfileRequest,
+      overrideAccessToken?: string,
+    ): Promise<CustomerProfileResponse> => {
+      const tokenToUse = overrideAccessToken ?? session?.accessToken;
+      if (!tokenToUse) {
         throw new ApiClientError({
           status: 401,
           errorCode: 'Unauthorized',
@@ -214,8 +250,9 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
         });
       }
       try {
-        const updated = await apiClient.updateMyProfile(session.accessToken, payload);
+        const updated = await apiClient.updateMyProfile(tokenToUse, payload);
         setProfile(updated);
+        setIsNewUserWithoutProfile(false);
         onProfileLoadedRef.current?.(updated);
         return updated;
       } catch (err) {
@@ -229,8 +266,10 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
   );
 
   const logout = useCallback(() => {
+    skipNextAutoFetchRef.current = false;
     setSession(null);
     setProfile(null);
+    setIsNewUserWithoutProfile(false);
     setAuthNotice(null);
   }, []);
 
@@ -242,6 +281,7 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
       isAuthenticated,
       profile,
       isLoadingProfile,
+      isNewUserWithoutProfile,
       authNotice,
       clearAuthNotice,
       requestOtpCode,
@@ -256,6 +296,7 @@ export function AuthProvider({ onProfileLoaded, children }: AuthProviderProps) {
       isAuthenticated,
       profile,
       isLoadingProfile,
+      isNewUserWithoutProfile,
       authNotice,
       clearAuthNotice,
       requestOtpCode,
