@@ -1,7 +1,7 @@
 /**
  * Cart Summary Panel & Mobile Slide-Over Drawer (`CartPanel.tsx`).
  * Displays configured cart line items with quantity steppers (`+`/`-`),
- * pre-calculated neighborhood delivery fee selector (`delivery_zones`),
+ * authoritative CEP-based delivery fee quote (`GET /delivery-fee?cep=...`),
  * integer-centavos Subtotal / Delivery Fee / Total breakdown, and Checkout CTA.
  */
 
@@ -9,17 +9,15 @@ import { ArrowRight, ExternalLink, Minus, Plus, ShoppingBag, Trash2, X } from 'l
 import {
   calculateLineItemTotalCents,
   formatCentsToBRL,
-  type DeliveryZone,
   type HealthResponse,
   type ThemeId,
 } from '../domain';
 import { useCart } from '../contexts/CartContext';
 import { BoizinhoMascot } from './BoizinhoMascot';
-import { NeighborhoodSelector } from './NeighborhoodSelector';
+import { CepDeliverySelector } from './CepDeliverySelector';
 
 interface CartPanelProps {
   theme: ThemeId;
-  deliveryZones: ReadonlyArray<DeliveryZone>;
   health: HealthResponse | null;
   onProceedToCheckout: () => void;
   onTrackOrder?: (orderId: string) => void;
@@ -29,7 +27,6 @@ interface CartPanelProps {
 
 export function CartPanel({
   theme,
-  deliveryZones,
   health,
   onProceedToCheckout,
   onTrackOrder,
@@ -39,16 +36,24 @@ export function CartPanel({
   const {
     cartItems,
     totalCartUnits,
-    selectedZoneId,
-    selectedZone,
+    deliveryQuote,
+    isQuotingCep,
+    cepQuoteError,
     subtotalCents,
     deliveryFeeCents,
     totalCents,
+    checkoutDraft,
     recentOrders,
     updateLineQuantity,
     removeLine,
-    selectZone,
+    quoteDeliveryByCep,
+    updateCheckoutDraft,
+    clearPersonalData,
   } = useCart();
+
+  const hasLocalPersonalData =
+    Boolean(checkoutDraft.name || checkoutDraft.postalCode || checkoutDraft.email) ||
+    recentOrders.length > 0;
 
   return (
     <div className="flex flex-col">
@@ -198,15 +203,16 @@ export function CartPanel({
             })}
           </ul>
 
-          {/* Searchable Neighborhood Delivery Fee Selector */}
-          {deliveryZones.length > 0 && (
-            <NeighborhoodSelector
-              zones={deliveryZones}
-              selectedZoneId={selectedZoneId}
-              onSelectZone={selectZone}
-              idPrefix={idPrefix}
-            />
-          )}
+          {/* Authoritative CEP Delivery Fee Selector */}
+          <CepDeliverySelector
+            postalCode={checkoutDraft.postalCode}
+            deliveryQuote={deliveryQuote}
+            isQuoting={isQuotingCep}
+            quoteError={cepQuoteError}
+            onPostalCodeChange={(postalCode) => updateCheckoutDraft({ postalCode })}
+            onQuoteCep={quoteDeliveryByCep}
+            idPrefix={idPrefix}
+          />
 
           {/* Integer-Centavos Monetary Breakdown */}
           <div className="space-y-1.5 border-t border-border pt-3 text-sm">
@@ -219,10 +225,10 @@ export function CartPanel({
 
             <div className="flex items-center justify-between">
               <span className="font-medium text-ink-secondary">
-                Taxa de entrega {selectedZone ? `(${selectedZone.name})` : ''}
+                Taxa de entrega {deliveryQuote?.district ? `(${deliveryQuote.district})` : ''}
               </span>
               <span data-testid="cart-delivery-fee" className="font-bold text-ink-primary">
-                {selectedZone ? formatCentsToBRL(deliveryFeeCents) : 'Selecione o bairro'}
+                {deliveryQuote ? formatCentsToBRL(deliveryFeeCents) : 'Informe seu CEP'}
               </span>
             </div>
 
@@ -249,10 +255,21 @@ export function CartPanel({
         </div>
       )}
 
-      {/* Subtle API Connection Footer */}
-      {health && (
-        <div className="mt-4 border-t border-border pt-3 text-[11px] text-ink-secondary">
-          Cozinha online ({health.environment}) &bull; Entrega própria até 5,5 km
+      {/* Subtle API Connection & Privacy Footer */}
+      {(health || hasLocalPersonalData) && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-[11px] text-ink-secondary">
+          {health && (
+            <span>Cozinha online ({health.environment}) &bull; Entrega própria até 5,5 km</span>
+          )}
+          {hasLocalPersonalData && (
+            <button
+              type="button"
+              onClick={clearPersonalData}
+              className="font-semibold text-ink-secondary underline hover:text-status-error"
+            >
+              Limpar meus dados
+            </button>
+          )}
         </div>
       )}
     </div>

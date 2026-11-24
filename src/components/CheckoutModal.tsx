@@ -1,12 +1,12 @@
 /**
- * Epic E3 Checkout & Pagar.me Payment Link Handoff Modal (`CheckoutModal.tsx`).
+ * Epic E3 + E5 + E6 Checkout & Pagar.me Payment Link Handoff Modal (`CheckoutModal.tsx`).
  *
  * Guardrails:
  * 1. Zero credit card fields collected in the frontend.
- * 2. Validates customer details (`name`, `phone`, `email`, `document_number`) and delivery address
- *    with pre-calculated neighborhood `zone_id` (`delivery_zones`).
- * 3. Submits `POST /orders` to `seumignon-backend`, saves `order_id` & `checkout_url` in `localStorage`,
- *    and hands off the customer to Pagar.me Hosted Checkout (`checkout_url`) for Pix or Credit Card payment.
+ * 2. Authoritative CEP delivery fee validated via `GET /delivery-fee?cep=...` (no manual fee picking).
+ * 3. Guest Checkout works 100% unauthenticated; if signed in via Email OTP, attaches
+ *    `Authorization: Bearer <access_token>` (falling back seamlessly to Guest on 401 expiry).
+ * 4. Saves `order_id` & `checkout_url` in `localStorage` and hands off to Pagar.me Hosted Checkout.
  */
 
 import { useEffect, useState, type FormEvent } from 'react';
@@ -23,45 +23,45 @@ import {
 } from 'lucide-react';
 import {
   buildCreateOrderRequest,
+  formatCepInput,
   formatCentsToBRL,
+  stripNonDigits,
   validateCheckoutForm,
   type CheckoutFieldErrors,
-  type DeliveryZone,
   type OrderResponse,
 } from '../domain';
+import { useAuth } from '../contexts/AuthContext';
 import { useCart } from '../contexts/CartContext';
-import { apiClient, ApiClientError } from '../services/api';
-import { NeighborhoodSelector } from './NeighborhoodSelector';
+import { ApiClientError, apiClient } from '../services/api';
+import { CepDeliverySelector } from './CepDeliverySelector';
 
 interface CheckoutModalProps {
   isOpen: boolean;
   onClose: () => void;
-  deliveryZones: ReadonlyArray<DeliveryZone>;
   onNavigateToOrderStatus?: (orderId: string) => void;
 }
 
-export function CheckoutModal({
-  isOpen,
-  onClose,
-  deliveryZones,
-  onNavigateToOrderStatus,
-}: CheckoutModalProps) {
+export function CheckoutModal({ isOpen, onClose, onNavigateToOrderStatus }: CheckoutModalProps) {
   const {
     cartItems,
-    selectedZoneId,
-    selectedZone,
+    deliveryQuote,
+    isQuotingCep,
+    cepQuoteError,
     subtotalCents,
     deliveryFeeCents,
     totalCents,
     checkoutDraft,
-    selectZone,
+    quoteDeliveryByCep,
     updateCheckoutDraft,
     recordCreatedOrder,
   } = useCart();
 
+  const { session, isAuthenticated, authNotice, saveProfile, handleUnauthorized } = useAuth();
+
   const [fieldErrors, setFieldErrors] = useState<CheckoutFieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [saveProfileOnSubmit, setSaveProfileOnSubmit] = useState<boolean>(true);
   const [createdOrder, setCreatedOrder] = useState<OrderResponse | null>(null);
 
   useEffect(() => {
@@ -69,8 +69,10 @@ export function CheckoutModal({
       setFieldErrors({});
       setSubmitError(null);
       setIsSubmitting(false);
+    } else if (isAuthenticated && session?.email && !checkoutDraft.email.trim()) {
+      updateCheckoutDraft({ email: session.email });
     }
-  }, [isOpen]);
+  }, [isOpen, isAuthenticated, session, checkoutDraft.email, updateCheckoutDraft]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -91,12 +93,7 @@ export function CheckoutModal({
     event.preventDefault();
     setSubmitError(null);
 
-    const effectiveDraft = {
-      ...checkoutDraft,
-      zoneId: selectedZoneId || checkoutDraft.zoneId,
-    };
-
-    const validation = validateCheckoutForm(effectiveDraft, deliveryZones);
+    const validation = validateCheckoutForm(checkoutDraft, deliveryQuote);
     if (!validation.isValid) {
       setFieldErrors(validation.errors);
       return;
@@ -107,10 +104,57 @@ export function CheckoutModal({
 
     try {
       const payload = buildCreateOrderRequest({
-        draft: effectiveDraft,
+        draft: checkoutDraft,
         cartItems,
+        customerId: isAuthenticated && session ? session.userId : '',
       });
-      const response = await apiClient.createOrder(payload);
+
+      let response: OrderResponse;
+      let usedAuthToken = Boolean(isAuthenticated && session?.accessToken);
+
+      try {
+        response = await apiClient.createOrder(payload, {
+          accessToken: usedAuthToken ? session?.accessToken : null,
+        });
+      } catch (err) {
+        // If access_token expired mid-session, clear auth cleanly and fall back to Guest Checkout
+        if (usedAuthToken && err instanceof ApiClientError && err.status === 401) {
+          handleUnauthorized();
+          usedAuthToken = false;
+          response = await apiClient.createOrder(
+            buildCreateOrderRequest({
+              draft: checkoutDraft,
+              cartItems,
+              customerId: '',
+            }),
+          );
+        } else {
+          throw err;
+        }
+      }
+
+      if (usedAuthToken && saveProfileOnSubmit && session?.accessToken) {
+        void saveProfile({
+          email: checkoutDraft.email.trim().toLowerCase(),
+          name: checkoutDraft.name.trim(),
+          phone: stripNonDigits(checkoutDraft.phone),
+          document_number: stripNonDigits(checkoutDraft.documentNumber),
+          default_address: {
+            postal_code: formatCepInput(checkoutDraft.postalCode),
+            street_name: checkoutDraft.streetName.trim(),
+            street_number: checkoutDraft.streetNumber.trim(),
+            district: checkoutDraft.district.trim(),
+            city: 'São Paulo',
+            state: 'SP',
+            complement: checkoutDraft.complement.trim(),
+            reference: checkoutDraft.reference.trim(),
+            country: 'BR',
+          },
+        }).catch(() => {
+          // Non-blocking: order already succeeded
+        });
+      }
+
       setCreatedOrder(response);
       recordCreatedOrder(response);
     } catch (err) {
@@ -267,6 +311,33 @@ export function CheckoutModal({
             className="flex flex-1 flex-col overflow-hidden"
           >
             <div className="flex-1 space-y-6 overflow-y-auto p-5">
+              {authNotice && (
+                <div
+                  role="status"
+                  className="flex items-start gap-2.5 rounded-xl border border-brand-primary/30 bg-brand-primary/10 p-3 text-xs font-medium text-ink-primary"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-brand-primary" />
+                  <span>{authNotice}</span>
+                </div>
+              )}
+
+              {isAuthenticated && session && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-status-success/30 bg-status-success/10 px-3.5 py-2.5 text-xs">
+                  <span className="font-semibold text-ink-primary">
+                    Conectado como <strong>{session.email}</strong>
+                  </span>
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 font-medium text-ink-secondary">
+                    <input
+                      type="checkbox"
+                      checked={saveProfileOnSubmit}
+                      onChange={(e) => setSaveProfileOnSubmit(e.target.checked)}
+                      className="rounded border-border text-brand-primary focus:ring-brand-primary"
+                    />
+                    <span>Salvar dados para próximos pedidos</span>
+                  </label>
+                </div>
+              )}
+
               {submitError && (
                 <div
                   role="alert"
@@ -277,18 +348,7 @@ export function CheckoutModal({
                 </div>
               )}
 
-              {/* Section 1: Pre-Calculated Neighborhood Delivery Zone */}
-              <section aria-label="Bairro de entrega">
-                <NeighborhoodSelector
-                  zones={deliveryZones}
-                  selectedZoneId={selectedZoneId}
-                  onSelectZone={selectZone}
-                  idPrefix="checkout"
-                  errorMessage={fieldErrors.zoneId}
-                />
-              </section>
-
-              {/* Section 2: Customer Identification */}
+              {/* Section 1: Customer Identification */}
               <section aria-label="Seus dados" className="space-y-3">
                 <div className="flex items-center gap-1.5 border-b border-border pb-1.5">
                   <User className="h-4 w-4 text-brand-primary" />
@@ -389,7 +449,7 @@ export function CheckoutModal({
                 </div>
               </section>
 
-              {/* Section 3: Delivery Address */}
+              {/* Section 2: Authoritative CEP Delivery Quote & Address */}
               <section aria-label="Endereço de entrega" className="space-y-3">
                 <div className="flex items-center gap-1.5 border-b border-border pb-1.5">
                   <MapPin className="h-4 w-4 text-brand-primary" />
@@ -398,30 +458,19 @@ export function CheckoutModal({
                   </h3>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div>
-                    <label
-                      htmlFor="checkout-cep"
-                      className="block text-xs font-bold text-ink-primary"
-                    >
-                      CEP *
-                    </label>
-                    <input
-                      id="checkout-cep"
-                      type="text"
-                      inputMode="numeric"
-                      value={checkoutDraft.postalCode}
-                      onChange={(e) => updateCheckoutDraft({ postalCode: e.target.value })}
-                      placeholder="Ex.: 01304-001"
-                      className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
-                    />
-                    {fieldErrors.postalCode && (
-                      <p className="mt-1 text-xs font-semibold text-status-error">
-                        {fieldErrors.postalCode}
-                      </p>
-                    )}
-                  </div>
+                <CepDeliverySelector
+                  postalCode={checkoutDraft.postalCode}
+                  deliveryQuote={deliveryQuote}
+                  isQuoting={isQuotingCep}
+                  quoteError={cepQuoteError}
+                  onPostalCodeChange={(postalCode) => updateCheckoutDraft({ postalCode })}
+                  onQuoteCep={quoteDeliveryByCep}
+                  idPrefix="checkout"
+                  validationError={fieldErrors.postalCode}
+                  alwaysShowInput
+                />
 
+                <div className="grid gap-3 sm:grid-cols-3">
                   <div className="sm:col-span-2">
                     <label
                       htmlFor="checkout-street"
@@ -434,7 +483,7 @@ export function CheckoutModal({
                       type="text"
                       value={checkoutDraft.streetName}
                       onChange={(e) => updateCheckoutDraft({ streetName: e.target.value })}
-                      placeholder="Ex.: Rua Augusta"
+                      placeholder="Ex.: Rua Exemplo"
                       className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                     />
                     {fieldErrors.streetName && (
@@ -456,12 +505,34 @@ export function CheckoutModal({
                       type="text"
                       value={checkoutDraft.streetNumber}
                       onChange={(e) => updateCheckoutDraft({ streetNumber: e.target.value })}
-                      placeholder="Ex.: 1500"
+                      placeholder="Ex.: 123"
                       className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
                     />
                     {fieldErrors.streetNumber && (
                       <p className="mt-1 text-xs font-semibold text-status-error">
                         {fieldErrors.streetNumber}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="checkout-district"
+                      className="block text-xs font-bold text-ink-primary"
+                    >
+                      Bairro *
+                    </label>
+                    <input
+                      id="checkout-district"
+                      type="text"
+                      value={checkoutDraft.district}
+                      onChange={(e) => updateCheckoutDraft({ district: e.target.value })}
+                      placeholder="Ex.: Alto da Mooca"
+                      className="mt-1 w-full rounded-xl border border-border bg-subtle/50 px-3 py-2 text-sm text-ink-primary focus:border-brand-primary focus:bg-surface focus:outline-none"
+                    />
+                    {fieldErrors.district && (
+                      <p className="mt-1 text-xs font-semibold text-status-error">
+                        {fieldErrors.district}
                       </p>
                     )}
                   </div>
@@ -539,7 +610,7 @@ export function CheckoutModal({
                   {' + '}
                   Entrega:{' '}
                   <strong className="text-ink-primary">
-                    {selectedZone ? formatCentsToBRL(deliveryFeeCents) : 'Selecione o bairro'}
+                    {deliveryQuote ? formatCentsToBRL(deliveryFeeCents) : 'Calcule pelo CEP'}
                   </strong>
                 </span>
                 <span className="text-sm font-bold text-brand-primary">

@@ -19,6 +19,7 @@ import {
   Flame,
   Lock,
   RefreshCw,
+  RotateCcw,
   Truck,
   XCircle,
 } from 'lucide-react';
@@ -37,6 +38,7 @@ interface OrderStatusPageProps {
   theme: ThemeId;
   onBackToMenu: () => void;
   onOrderUpdated?: (order: OrderResponse) => void;
+  onReorder?: (order: OrderResponse) => void;
   pollIntervalMs?: number;
 }
 
@@ -45,6 +47,7 @@ export function OrderStatusPage({
   theme,
   onBackToMenu,
   onOrderUpdated,
+  onReorder,
   pollIntervalMs = 5000,
 }: OrderStatusPageProps) {
   const [order, setOrder] = useState<OrderResponse | null>(null);
@@ -420,6 +423,20 @@ export function OrderStatusPage({
                 </span>
               </div>
             </div>
+
+            {order.items.length > 0 && onReorder && (
+              <button
+                type="button"
+                onClick={() => {
+                  onReorder(order);
+                  onBackToMenu();
+                }}
+                className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-subtle px-4 py-2.5 text-xs font-bold text-ink-primary transition hover:bg-canvas"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>Pedir os mesmos itens novamente</span>
+              </button>
+            )}
           </div>
         </div>
       )}

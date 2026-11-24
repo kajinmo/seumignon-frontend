@@ -1,6 +1,6 @@
 /**
- * Global Cart, Delivery Zone, Checkout Draft & Recent Orders Context (`CartContext`).
- * Persists state in `localStorage` and computes all monetary totals strictly in integer centavos.
+ * Global Cart, Authoritative CEP Delivery Quote, Checkout Draft & Recent Orders Context (`CartContext`).
+ * Persists state in `localStorage` and computes all display subtotals strictly in integer centavos.
  */
 
 import {
@@ -9,6 +9,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -16,19 +17,24 @@ import {
   INITIAL_CHECKOUT_FORM_DRAFT,
   calculateCartSubtotalCents,
   calculateOrderTotalCents,
-  findDeliveryZoneById,
+  formatCepInput,
+  getFriendlyCepErrorMessage,
+  isCompleteCep,
+  stripNonDigits,
   upsertRecentOrderList,
   type CartLineItem,
   type CheckoutFormDraft,
-  type DeliveryZone,
+  type CustomerProfileResponse,
+  type DeliveryFeeQuoteResponse,
   type MenuItem,
   type OrderResponse,
   type PricedChoiceSelection,
   type StoredRecentOrder,
 } from '../domain';
+import { ApiClientError, apiClient, lookupCepAddressPublic } from '../services/api';
 
 export const CART_STORAGE_KEY = 'seumignon:cart:v1';
-export const ZONE_STORAGE_KEY = 'seumignon:selected-zone:v1';
+export const DELIVERY_QUOTE_STORAGE_KEY = 'seumignon:delivery-quote:v1';
 export const CHECKOUT_DRAFT_STORAGE_KEY = 'seumignon:checkout-draft:v1';
 export const RECENT_ORDERS_STORAGE_KEY = 'seumignon:recent-orders:v1';
 
@@ -43,8 +49,9 @@ export interface CartContextValue {
   cartItems: CartLineItem[];
   totalCartUnits: number;
   cartQuantitiesByItemId: Record<string, number>;
-  selectedZoneId: string;
-  selectedZone: DeliveryZone | undefined;
+  deliveryQuote: DeliveryFeeQuoteResponse | null;
+  isQuotingCep: boolean;
+  cepQuoteError: string | null;
   subtotalCents: number;
   deliveryFeeCents: number;
   totalCents: number;
@@ -54,10 +61,14 @@ export interface CartContextValue {
   updateLineQuantity: (cartLineId: string, delta: number) => void;
   removeLine: (cartLineId: string) => void;
   clearCart: () => void;
-  selectZone: (zoneId: string) => void;
+  quoteDeliveryByCep: (rawCep: string) => Promise<DeliveryFeeQuoteResponse | null>;
+  clearDeliveryQuote: () => void;
   updateCheckoutDraft: (patch: Partial<CheckoutFormDraft>) => void;
+  prefillFromCustomerProfile: (profile: CustomerProfileResponse) => void;
+  clearPersonalData: () => void;
   recordCreatedOrder: (order: OrderResponse) => void;
   syncPolledOrderStatus: (order: OrderResponse) => void;
+  reorderFromOrder: (order: OrderResponse) => void;
 }
 
 const CartContext = createContext<CartContextValue | null>(null);
@@ -78,18 +89,39 @@ function readStoredCart(): CartLineItem[] {
   return [];
 }
 
-function readStoredZoneId(): string {
-  if (typeof window === 'undefined') return '';
+function readStoredDeliveryQuote(): DeliveryFeeQuoteResponse | null {
+  if (typeof window === 'undefined') return null;
   try {
-    return window.localStorage.getItem(ZONE_STORAGE_KEY) ?? '';
+    const raw = window.localStorage.getItem(DELIVERY_QUOTE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<DeliveryFeeQuoteResponse>;
+      if (
+        typeof parsed.cep === 'string' &&
+        typeof parsed.fee_cents === 'number' &&
+        Number.isInteger(parsed.fee_cents)
+      ) {
+        return {
+          cep: parsed.cep,
+          distance_km: typeof parsed.distance_km === 'number' ? parsed.distance_km : 0,
+          fee_cents: parsed.fee_cents,
+          district: typeof parsed.district === 'string' ? parsed.district : '',
+          source: typeof parsed.source === 'string' ? parsed.source : 'local_index',
+        };
+      }
+    }
   } catch {
-    return '';
+    // Ignore storage errors
   }
+  return null;
 }
 
-function readStoredCheckoutDraft(initialZoneId: string): CheckoutFormDraft {
+function readStoredCheckoutDraft(initialQuote: DeliveryFeeQuoteResponse | null): CheckoutFormDraft {
   if (typeof window === 'undefined') {
-    return { ...INITIAL_CHECKOUT_FORM_DRAFT, zoneId: initialZoneId };
+    return {
+      ...INITIAL_CHECKOUT_FORM_DRAFT,
+      postalCode: initialQuote ? formatCepInput(initialQuote.cep) : '',
+      district: initialQuote?.district ?? '',
+    };
   }
   try {
     const raw = window.localStorage.getItem(CHECKOUT_DRAFT_STORAGE_KEY);
@@ -98,13 +130,18 @@ function readStoredCheckoutDraft(initialZoneId: string): CheckoutFormDraft {
       return {
         ...INITIAL_CHECKOUT_FORM_DRAFT,
         ...parsed,
-        zoneId: initialZoneId || parsed.zoneId || '',
+        postalCode: parsed.postalCode || (initialQuote ? formatCepInput(initialQuote.cep) : ''),
+        district: parsed.district || initialQuote?.district || '',
       };
     }
   } catch {
     // Ignore storage errors
   }
-  return { ...INITIAL_CHECKOUT_FORM_DRAFT, zoneId: initialZoneId };
+  return {
+    ...INITIAL_CHECKOUT_FORM_DRAFT,
+    postalCode: initialQuote ? formatCepInput(initialQuote.cep) : '',
+    district: initialQuote?.district ?? '',
+  };
 }
 
 function readStoredRecentOrders(): StoredRecentOrder[] {
@@ -124,17 +161,28 @@ function readStoredRecentOrders(): StoredRecentOrder[] {
 }
 
 interface CartProviderProps {
-  deliveryZones: ReadonlyArray<DeliveryZone>;
   children: ReactNode;
 }
 
-export function CartProvider({ deliveryZones, children }: CartProviderProps) {
+export function CartProvider({ children }: CartProviderProps) {
   const [cartItems, setCartItems] = useState<CartLineItem[]>(readStoredCart);
-  const [selectedZoneId, setSelectedZoneId] = useState<string>(readStoredZoneId);
+  const [deliveryQuote, setDeliveryQuote] = useState<DeliveryFeeQuoteResponse | null>(
+    readStoredDeliveryQuote,
+  );
+  const [isQuotingCep, setIsQuotingCep] = useState<boolean>(false);
+  const [cepQuoteError, setCepQuoteError] = useState<string | null>(null);
   const [checkoutDraft, setCheckoutDraft] = useState<CheckoutFormDraft>(() =>
-    readStoredCheckoutDraft(readStoredZoneId()),
+    readStoredCheckoutDraft(readStoredDeliveryQuote()),
   );
   const [recentOrders, setRecentOrders] = useState<StoredRecentOrder[]>(readStoredRecentOrders);
+
+  const cepQuoteAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      cepQuoteAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -146,11 +194,15 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(ZONE_STORAGE_KEY, selectedZoneId);
+      if (deliveryQuote) {
+        window.localStorage.setItem(DELIVERY_QUOTE_STORAGE_KEY, JSON.stringify(deliveryQuote));
+      } else {
+        window.localStorage.removeItem(DELIVERY_QUOTE_STORAGE_KEY);
+      }
     } catch {
       // Ignore storage errors
     }
-  }, [selectedZoneId]);
+  }, [deliveryQuote]);
 
   useEffect(() => {
     try {
@@ -168,13 +220,8 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
     }
   }, [recentOrders]);
 
-  const selectedZone = useMemo(
-    () => findDeliveryZoneById(deliveryZones, selectedZoneId),
-    [deliveryZones, selectedZoneId],
-  );
-
   const subtotalCents = useMemo(() => calculateCartSubtotalCents(cartItems), [cartItems]);
-  const deliveryFeeCents = selectedZone ? selectedZone.fee_cents : 0;
+  const deliveryFeeCents = deliveryQuote ? deliveryQuote.fee_cents : 0;
   const totalCents = useMemo(
     () =>
       calculateOrderTotalCents({
@@ -231,19 +278,145 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
     setCartItems([]);
   }, []);
 
-  const selectZone = useCallback((zoneId: string) => {
-    setSelectedZoneId(zoneId);
-    setCheckoutDraft((prev) => ({ ...prev, zoneId }));
+  const clearDeliveryQuote = useCallback(() => {
+    cepQuoteAbortRef.current?.abort();
+    setDeliveryQuote(null);
+    setCepQuoteError(null);
+    setIsQuotingCep(false);
   }, []);
 
-  const updateCheckoutDraft = useCallback((patch: Partial<CheckoutFormDraft>) => {
-    setCheckoutDraft((prev) => {
-      const next = { ...prev, ...patch };
-      if (patch.zoneId !== undefined) {
-        setSelectedZoneId(patch.zoneId);
+  const updateCheckoutDraft = useCallback(
+    (patch: Partial<CheckoutFormDraft>) => {
+      const formattedPostal =
+        patch.postalCode !== undefined ? formatCepInput(patch.postalCode) : undefined;
+
+      setCheckoutDraft((prev) => ({
+        ...prev,
+        ...patch,
+        ...(formattedPostal !== undefined ? { postalCode: formattedPostal } : {}),
+      }));
+
+      if (formattedPostal !== undefined) {
+        const nextPostalDigits = stripNonDigits(formattedPostal);
+        setCepQuoteError(null);
+        if (deliveryQuote && stripNonDigits(deliveryQuote.cep) !== nextPostalDigits) {
+          setDeliveryQuote(null);
+        }
       }
-      return next;
-    });
+    },
+    [deliveryQuote],
+  );
+
+  const quoteDeliveryByCep = useCallback(
+    async (rawCep: string): Promise<DeliveryFeeQuoteResponse | null> => {
+      const digits = stripNonDigits(rawCep);
+      const formatted = formatCepInput(digits);
+
+      setCheckoutDraft((prev) =>
+        prev.postalCode === formatted ? prev : { ...prev, postalCode: formatted },
+      );
+
+      if (!isCompleteCep(digits)) {
+        cepQuoteAbortRef.current?.abort();
+        setDeliveryQuote(null);
+        setIsQuotingCep(false);
+        setCepQuoteError('Informe um CEP válido com 8 dígitos (ex.: 03195-000).');
+        return null;
+      }
+
+      cepQuoteAbortRef.current?.abort();
+      const controller = new AbortController();
+      cepQuoteAbortRef.current = controller;
+
+      setIsQuotingCep(true);
+      setCepQuoteError(null);
+
+      // Fire optional ViaCEP address enrichment concurrently so it never blocks authoritative backend quote
+      void lookupCepAddressPublic(digits, controller.signal).then((publicAddress) => {
+        if (controller.signal.aborted || !publicAddress) return;
+        setCheckoutDraft((prev) => {
+          if (stripNonDigits(prev.postalCode) !== digits) {
+            return prev;
+          }
+          return {
+            ...prev,
+            streetName: prev.streetName.trim() ? prev.streetName : (publicAddress.streetName ?? ''),
+            district: prev.district.trim() ? prev.district : (publicAddress.district ?? ''),
+          };
+        });
+      });
+
+      try {
+        const quote = await apiClient.getDeliveryFee(formatted, controller.signal);
+        if (controller.signal.aborted) {
+          return null;
+        }
+        setDeliveryQuote(quote);
+        setCheckoutDraft((prev) => ({
+          ...prev,
+          postalCode: formatCepInput(quote.cep),
+          district: quote.district.trim() || prev.district,
+        }));
+        return quote;
+      } catch (err) {
+        if (controller.signal.aborted) {
+          return null;
+        }
+        setDeliveryQuote(null);
+        if (err instanceof ApiClientError) {
+          setCepQuoteError(getFriendlyCepErrorMessage(err.errorCode, err.detail));
+        } else {
+          setCepQuoteError('Não foi possível consultar o frete para este CEP agora.');
+        }
+        return null;
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsQuotingCep(false);
+        }
+      }
+    },
+    [],
+  );
+
+  const prefillFromCustomerProfile = useCallback(
+    (profile: CustomerProfileResponse) => {
+      const addr = profile.default_address;
+      setCheckoutDraft((prev) => ({
+        ...prev,
+        name: prev.name.trim() || profile.name || '',
+        phone: prev.phone.trim() || profile.phone || '',
+        email: prev.email.trim() || profile.email || '',
+        documentNumber: prev.documentNumber.trim() || profile.document_number || '',
+        postalCode:
+          prev.postalCode.trim() || (addr?.postal_code ? formatCepInput(addr.postal_code) : ''),
+        streetName: prev.streetName.trim() || addr?.street_name || '',
+        streetNumber: prev.streetNumber.trim() || addr?.street_number || '',
+        district: prev.district.trim() || addr?.district || '',
+        complement: prev.complement.trim() || addr?.complement || '',
+        reference: prev.reference.trim() || addr?.reference || '',
+      }));
+
+      const savedCep = addr?.postal_code ?? '';
+      if (isCompleteCep(savedCep) && !deliveryQuote) {
+        void quoteDeliveryByCep(savedCep);
+      }
+    },
+    [deliveryQuote, quoteDeliveryByCep],
+  );
+
+  const clearPersonalData = useCallback(() => {
+    cepQuoteAbortRef.current?.abort();
+    setCheckoutDraft(INITIAL_CHECKOUT_FORM_DRAFT);
+    setDeliveryQuote(null);
+    setCepQuoteError(null);
+    setRecentOrders([]);
+    try {
+      window.localStorage.removeItem(CHECKOUT_DRAFT_STORAGE_KEY);
+      window.localStorage.removeItem(DELIVERY_QUOTE_STORAGE_KEY);
+      window.localStorage.removeItem(RECENT_ORDERS_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors
+    }
   }, []);
 
   const recordCreatedOrder = useCallback((order: OrderResponse) => {
@@ -255,13 +428,36 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
     setRecentOrders((prev) => upsertRecentOrderList(prev, order));
   }, []);
 
+  const reorderFromOrder = useCallback((order: OrderResponse) => {
+    if (!order.items || order.items.length === 0) return;
+    const restoredLines: CartLineItem[] = order.items.map((item, index) => ({
+      cart_line_id: `${item.item_id}-${String(Date.now())}-${String(index)}`,
+      item_id: item.item_id,
+      name: item.name,
+      size: item.size,
+      unit_price_cents: item.unit_price_cents,
+      quantity: item.quantity,
+      choices: item.choices.map((c) => ({
+        group_id: c.group_id,
+        choice_item_id: c.choice_item_id,
+        name: c.name,
+        price_cents: c.unit_price_cents,
+        quantity: c.quantity,
+        notes: c.notes,
+      })),
+      notes: item.notes,
+    }));
+    setCartItems(restoredLines);
+  }, []);
+
   const value = useMemo<CartContextValue>(
     () => ({
       cartItems,
       totalCartUnits,
       cartQuantitiesByItemId,
-      selectedZoneId,
-      selectedZone,
+      deliveryQuote,
+      isQuotingCep,
+      cepQuoteError,
       subtotalCents,
       deliveryFeeCents,
       totalCents,
@@ -271,17 +467,22 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
       updateLineQuantity,
       removeLine,
       clearCart,
-      selectZone,
+      quoteDeliveryByCep,
+      clearDeliveryQuote,
       updateCheckoutDraft,
+      prefillFromCustomerProfile,
+      clearPersonalData,
       recordCreatedOrder,
       syncPolledOrderStatus,
+      reorderFromOrder,
     }),
     [
       cartItems,
       totalCartUnits,
       cartQuantitiesByItemId,
-      selectedZoneId,
-      selectedZone,
+      deliveryQuote,
+      isQuotingCep,
+      cepQuoteError,
       subtotalCents,
       deliveryFeeCents,
       totalCents,
@@ -291,10 +492,14 @@ export function CartProvider({ deliveryZones, children }: CartProviderProps) {
       updateLineQuantity,
       removeLine,
       clearCart,
-      selectZone,
+      quoteDeliveryByCep,
+      clearDeliveryQuote,
       updateCheckoutDraft,
+      prefillFromCustomerProfile,
+      clearPersonalData,
       recordCreatedOrder,
       syncPolledOrderStatus,
+      reorderFromOrder,
     ],
   );
 

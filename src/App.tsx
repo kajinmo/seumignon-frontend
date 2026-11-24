@@ -1,15 +1,16 @@
 /**
- * Epic E2, E3 & E4 Full SPA Storefront & Live Order Tracking (`/orders/:orderId`).
+ * Epic E2, E3, E4, E5 & E6 Full SPA Storefront & Live Order Tracking (`/orders/:orderId`).
  * Includes Smart Welcome Popup, Illustrated Brand & Mascot Assets,
  * Sticky Opaque Header & Category Tabs, Dish Cards, Sweetgreen-style 3x4 Side Selection Modal,
  * Persistent CartContext (`localStorage`), Mobile Cart Drawer + Sticky Desktop Cart Sidebar,
- * Searchable Pre-Calculated Neighborhood Delivery Fee Selector (`delivery_zones`),
- * Checkout Modal with Pagar.me Hosted `checkout_url` Handoff,
+ * Authoritative CEP Delivery Fee Lookup (`GET /delivery-fee?cep=...`),
+ * Optional Passwordless Email OTP Account (`AuthContext` + `AccountModal`),
+ * Checkout Modal with Pagar.me Hosted `checkout_url` Handoff (`POST /orders`),
  * and `/orders/:orderId` live polling view (`PENDING` -> `PAID` -> `DISPATCHED` | `CANCELLED`).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { HelpCircle, Palette, ShoppingBag } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { HelpCircle, Palette, ShoppingBag, User } from 'lucide-react';
 import {
   WELCOME_PROMO_CONFIG,
   formatCentsToBRL,
@@ -17,10 +18,13 @@ import {
   type HealthResponse,
   type MenuItem,
   type MenuResponse,
+  type OrderResponse,
   type ThemeId,
 } from './domain';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { CartProvider, useCart } from './contexts/CartContext';
 import { apiClient, ApiClientError } from './services/api';
+import { AccountModal } from './components/AccountModal';
 import { BoizinhoMascot } from './components/BoizinhoMascot';
 import { BrandPreviewModal } from './components/BrandPreviewModal';
 import { WelcomePromoModal } from './components/WelcomePromoModal';
@@ -91,14 +95,23 @@ function StorefrontContent({
   );
   const [isWelcomeOpen, setIsWelcomeOpen] = useState<boolean>(getInitialWelcomeOpen);
   const [isBrandShowcaseOpen, setIsBrandShowcaseOpen] = useState<boolean>(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
   const [activeCategory, setActiveCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedDishForModal, setSelectedDishForModal] = useState<MenuItem | null>(null);
   const [isMobileCartDrawerOpen, setIsMobileCartDrawerOpen] = useState<boolean>(false);
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState<boolean>(false);
 
-  const { totalCartUnits, cartQuantitiesByItemId, totalCents, addToCart, syncPolledOrderStatus } =
-    useCart();
+  const {
+    totalCartUnits,
+    cartQuantitiesByItemId,
+    totalCents,
+    addToCart,
+    syncPolledOrderStatus,
+    reorderFromOrder,
+  } = useCart();
+
+  const { isAuthenticated, profile, session } = useAuth();
 
   // Keep `activeOrderId` synchronized with browser Back/Forward buttons (`popstate`)
   useEffect(() => {
@@ -125,6 +138,14 @@ function StorefrontContent({
     }
     setActiveOrderId(null);
   }, []);
+
+  const handleReorder = useCallback(
+    (order: OrderResponse) => {
+      reorderFromOrder(order);
+      navigateToCatalog();
+    },
+    [reorderFromOrder, navigateToCatalog],
+  );
 
   function handleDismissWelcome() {
     setIsWelcomeOpen(false);
@@ -211,7 +232,9 @@ function StorefrontContent({
     }));
   }, [enrichedMenuItems, activeCategory, searchQuery]);
 
-  const deliveryZones = menu?.delivery_zones ?? [];
+  const accountButtonLabel = isAuthenticated
+    ? profile?.name?.trim().split(' ')[0] || session?.email.split('@')[0] || 'Minha Conta'
+    : 'Entrar';
 
   return (
     <div className="min-h-screen bg-canvas pb-28 text-ink-primary lg:pb-12">
@@ -231,6 +254,14 @@ function StorefrontContent({
         onClose={() => setIsBrandShowcaseOpen(false)}
         activeTheme={theme}
         onSelectTheme={onSelectTheme}
+      />
+
+      {/* Optional Passwordless Email OTP Account, Profile & Cloud Order History Modal */}
+      <AccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        onTrackOrder={navigateToOrderStatus}
+        onReorder={handleReorder}
       />
 
       {/* Sticky Top Header — Solid Opaque bg-surface so scrolling content never bleeds through */}
@@ -267,17 +298,31 @@ function StorefrontContent({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              data-testid="account-modal-trigger"
+              onClick={() => setIsAccountModalOpen(true)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold transition ${
+                isAuthenticated
+                  ? 'border-status-success/40 bg-status-success/10 text-status-success hover:bg-status-success hover:text-white'
+                  : 'border-brand-primary/30 bg-brand-primary/10 text-brand-primary hover:bg-brand-primary hover:text-white'
+              }`}
+            >
+              <User className="h-3.5 w-3.5" />
+              <span>{accountButtonLabel}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setIsBrandShowcaseOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-brand-primary/30 bg-brand-primary/10 px-3 py-1.5 text-xs font-bold text-brand-primary transition hover:bg-brand-primary hover:text-white"
+              className="hidden items-center gap-1.5 rounded-full border border-brand-primary/30 bg-brand-primary/10 px-3 py-1.5 text-xs font-bold text-brand-primary transition hover:bg-brand-primary hover:text-white md:inline-flex"
             >
               <Palette className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Ver Logos &amp; Mascote</span>
+              <span>Ver Logos &amp; Mascote</span>
             </button>
 
             <button
               type="button"
               onClick={() => setIsWelcomeOpen(true)}
-              className="hidden items-center gap-1 rounded-full border border-border bg-subtle px-3 py-1.5 text-xs font-semibold text-ink-secondary transition hover:text-ink-primary md:inline-flex"
+              className="hidden items-center gap-1 rounded-full border border-border bg-subtle px-3 py-1.5 text-xs font-semibold text-ink-secondary transition hover:text-ink-primary lg:inline-flex"
             >
               <HelpCircle className="h-3.5 w-3.5" />
               <span>Como funciona</span>
@@ -326,6 +371,7 @@ function StorefrontContent({
             theme={theme}
             onBackToMenu={navigateToCatalog}
             onOrderUpdated={syncPolledOrderStatus}
+            onReorder={handleReorder}
             pollIntervalMs={orderPollIntervalMs}
           />
         </main>
@@ -405,14 +451,13 @@ function StorefrontContent({
                   )}
                 </div>
 
-                {/* Right Column: Sticky Cart Sidebar with Pre-Calculated Neighborhood Fee Selector */}
+                {/* Right Column: Sticky Cart Sidebar with Authoritative CEP Delivery Fee Selector */}
                 <aside
                   aria-label="Sua Sacola"
                   className="sticky top-[135px] rounded-2xl border border-border bg-surface p-5 shadow-xs"
                 >
                   <CartPanel
                     theme={theme}
-                    deliveryZones={deliveryZones}
                     health={health}
                     onProceedToCheckout={() => setIsCheckoutModalOpen(true)}
                     onTrackOrder={navigateToOrderStatus}
@@ -459,7 +504,6 @@ function StorefrontContent({
               >
                 <CartPanel
                   theme={theme}
-                  deliveryZones={deliveryZones}
                   health={health}
                   idPrefix="mobile-cart"
                   onCloseDrawer={() => setIsMobileCartDrawerOpen(false)}
@@ -483,17 +527,21 @@ function StorefrontContent({
             onConfirmAddToCart={addToCart}
           />
 
-          {/* Epic E3 Checkout & Pagar.me Hosted Payment Link Modal */}
+          {/* Epic E3 + E5 + E6 Checkout & Pagar.me Hosted Payment Link Modal */}
           <CheckoutModal
             isOpen={isCheckoutModalOpen}
             onClose={() => setIsCheckoutModalOpen(false)}
-            deliveryZones={deliveryZones}
             onNavigateToOrderStatus={navigateToOrderStatus}
           />
         </>
       )}
     </div>
   );
+}
+
+function CartAwareAuthProvider({ children }: { children: ReactNode }) {
+  const { prefillFromCustomerProfile } = useCart();
+  return <AuthProvider onProfileLoaded={prefillFromCustomerProfile}>{children}</AuthProvider>;
 }
 
 export interface AppProps {
@@ -553,16 +601,18 @@ export function App({ orderPollIntervalMs }: AppProps = {}) {
   }, []);
 
   return (
-    <CartProvider deliveryZones={menu?.delivery_zones ?? []}>
-      <StorefrontContent
-        theme={theme}
-        onSelectTheme={setTheme}
-        health={health}
-        menu={menu}
-        isLoading={isLoading}
-        apiError={apiError}
-        orderPollIntervalMs={orderPollIntervalMs}
-      />
+    <CartProvider>
+      <CartAwareAuthProvider>
+        <StorefrontContent
+          theme={theme}
+          onSelectTheme={setTheme}
+          health={health}
+          menu={menu}
+          isLoading={isLoading}
+          apiError={apiError}
+          orderPollIntervalMs={orderPollIntervalMs}
+        />
+      </CartAwareAuthProvider>
     </CartProvider>
   );
 }
