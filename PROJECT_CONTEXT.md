@@ -200,7 +200,9 @@ Possible `status` values: `"PENDING"` | `"PAID"` | `"DISPATCHED"` | `"CANCELLED"
 
 ### 3.6. Passwordless Email OTP & Customer Routes (`Authorization: Bearer <access_token>`)
 
-- `POST /auth/request-code` (`{ "email": "..." }`) -> `{ "email", "challenge_name": "EMAIL_OTP", "session" }`
+- `POST /auth/request-code` (`{ "email": "...", "create_if_missing": false | true }`):
+  - When `create_if_missing: false` (default for "Já tenho conta"): checks Cognito; returns `404 UserNotFoundError` without sending an OTP if unregistered so the frontend redirects to "Criar minha conta".
+  - When `create_if_missing: true` (after completing the upfront registration form): provisions the user if needed and returns `200 OK` `{ "email", "challenge_name": "EMAIL_OTP", "session" }`.
 - `POST /auth/verify-code` (`{ "email", "code", "session" }`) -> `{ "user_id", "email", "access_token", "id_token", "refresh_token", "expires_in_seconds" }`
 - `GET /me/profile` / `PUT /me/profile` -> saved customer details and `default_address`
 - `GET /me/orders` -> `OrderResponse[]`

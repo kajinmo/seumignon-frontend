@@ -35,6 +35,7 @@ Chronological record of UI/UX design decisions, epic execution milestones, and C
 - [x] Inventoried visual references under `visual_references/` (`logo/{bbq-king.png,thebear.png}`, `mascot/{cmv*,cuphead*,pauls.png,zelda*}`, `webpage/pandafood/*`, `webpage/sweetgreen/*`).
 - [x] Conduct guided `/grill-me` UI/UX & Design System interview (palette, brand personality, typography, dish photography treatment, mascot placement, mobile vs. desktop layout).
 - [x] Document finalized Design Tokens (`COLORS`, `TYPOGRAPHY`, spacing/radius, mascot role, dual-theme A/B switcher specification) before writing Epic `E1` production code.
+- [x] Lock visual identity to Theme B (`#CB2031` on `#F5EFE2` oat kraft cream) combined with Theme A typography (`Oswald` + `Plus Jakarta Sans`), remove the header theme switcher, and organize catalog navigation into curated category shortcuts (`Os mais pedidos`, `Grelhados`, `Clássicos da Cozinha`, `Acompanhamentos`, `Sobremesa`, `Bebidas`, `Todos`).
 
 ### Epic E1: Project Bootstrap & API Client (Completed)
 
@@ -69,7 +70,7 @@ Chronological record of UI/UX design decisions, epic execution milestones, and C
 ### Epic E6: Optional Customer Cloud Account — Passwordless (Completed)
 
 - [x] Add optional 2-step Passwordless Email OTP (`POST /auth/request-code` -> `POST /auth/verify-code`) without blocking Guest Checkout, keeping OTP challenge `session` strictly in memory.
-- [x] Build `AuthContext` & `AccountModal` ("Meus Pedidos" via `GET /me/orders` and "Meu Perfil & Endereço" via `GET/PUT /me/profile`) using `Authorization: Bearer <access_token>` and automatic `401` session cleanup with Guest fallback.
+- [x] Build `AuthContext` & `AccountModal` ("Já tenho conta" vs. upfront "Criar minha conta" registration + Email OTP verification, "Meus Pedidos" via `GET /me/orders`, and "Meu Perfil & Endereço" via `GET/PUT /me/profile`) using `Authorization: Bearer <access_token>` and automatic `401` session cleanup with Guest fallback.
 
 ### Epic E7: White-Label Template & Brand Config Extraction (Planned)
 
